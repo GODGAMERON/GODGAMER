@@ -4,7 +4,7 @@ import asyncpg
 
 from config import DATABASE_URL
 
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 pool = None
 
@@ -80,6 +80,7 @@ async def add_channel(username):
     username = username.strip().lstrip("@").lower()
 
     async with get_pool().acquire() as conn:
+
         result = await conn.fetchrow("""
             INSERT INTO channels (channel_username)
             VALUES ($1)
@@ -146,7 +147,7 @@ async def set_quantity(username, quantity):
     async with get_pool().acquire() as conn:
         async with conn.transaction():
 
-channel = await conn.fetchrow("""
+            channel = await conn.fetchrow("""
                 UPDATE channels
                 SET quantity = $2,
                     updated_at = NOW()

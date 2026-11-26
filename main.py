@@ -3,6 +3,8 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.filters import CommandStart
+from aiogram.types import Message
 
 from config import BOT_TOKEN
 from database import init_db, close_db
@@ -32,6 +34,23 @@ async def main():
     dp.include_router(channels_router)
     dp.include_router(reports_router)
 
+    # Start command handler
+    @dp.message(CommandStart())
+    async def start_command(message: Message):
+        await message.answer(
+            "👋 Welcome!\n\n"
+            "Your Telegram Bot is running successfully.\n\n"
+            "Use the available admin commands to manage your channels."
+        )
+
+    # Unknown message handler
+    @dp.message()
+    async def unknown_message(message: Message):
+        await message.answer(
+            "❓ Sorry, I don't understand this command.\n\n"
+            "Please send /start or use a valid bot command."
+        )
+
     database_initialized = False
 
     try:
@@ -39,7 +58,7 @@ async def main():
         await init_db()
         database_initialized = True
 
-        # Start background scheduler
+        # Start scheduler
         start_scheduler()
 
         logging.info("Telegram bot is starting...")
@@ -52,14 +71,11 @@ async def main():
         raise
 
     finally:
-        # Stop scheduler
         stop_scheduler()
 
-        # Close database
         if database_initialized:
             await close_db()
 
-        # Close Telegram session
         await bot.session.close()
 
         logging.info("Telegram bot stopped.")

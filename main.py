@@ -20,6 +20,7 @@ from services import router as services_router
 from order_engine import router as order_engine_router
 from bot_commands import router as bot_commands_router
 from order_commands import router as order_commands_router
+from system_commands import router as system_commands_router
 
 from scheduler import start_scheduler, stop_scheduler
 
@@ -51,13 +52,13 @@ async def main():
     dp.include_router(services_router)
     dp.include_router(reports_router)
     dp.include_router(order_commands_router)
+    dp.include_router(system_commands_router)
     dp.include_router(order_engine_router)
 
     try:
         logger.info("Initializing database...")
         await init_db()
 
-        logger.info("Checking Telegram connection...")
         bot_info = await bot.get_me()
 
         logger.info(
@@ -66,10 +67,8 @@ async def main():
             bot_info.id
         )
 
-        # Start background order status checker
         start_scheduler()
 
-        # Remove webhook before polling
         await bot.delete_webhook(drop_pending_updates=False)
 
         logger.info("Starting Telegram polling...")
@@ -87,9 +86,7 @@ async def main():
         logger.info("Stopping bot...")
 
         stop_scheduler()
-
         await close_db()
-
         await bot.session.close()
 
         logger.info("Bot stopped.")

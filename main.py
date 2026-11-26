@@ -2,7 +2,7 @@
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 
@@ -12,6 +12,10 @@ from channels import router as channels_router
 from reports import router as reports_router
 from admin import router as admin_router
 from scheduler import start_scheduler, stop_scheduler
+
+
+# Fallback router for unknown messages
+fallback_router = Router()
 
 
 async def main():
@@ -29,41 +33,40 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
 
-    # Register command routers
-    dp.include_router(admin_router)
-    dp.include_router(channels_router)
-    dp.include_router(reports_router)
-
-    # Start command handler
+    # Start command
     @dp.message(CommandStart())
     async def start_command(message: Message):
         await message.answer(
             "👋 Welcome!\n\n"
             "Your Telegram Bot is running successfully.\n\n"
-            "Use the available admin commands to manage your channels."
+            "Send /qtyhelp to see all available commands."
         )
 
-    # Unknown message handler
-    @dp.message()
+    # Register command routers first
+    dp.include_router(admin_router)
+    dp.include_router(channels_router)
+    dp.include_router(reports_router)
+
+    # Unknown messages must be handled last
+    @fallback_router.message()
     async def unknown_message(message: Message):
         await message.answer(
             "❓ Sorry, I don't understand this command.\n\n"
-            "Please send /start or use a valid bot command."
+            "Please send /qtyhelp to see available commands."
         )
+
+    dp.include_router(fallback_router)
 
     database_initialized = False
 
     try:
-        # Initialize PostgreSQL
         await init_db()
         database_initialized = True
 
-        # Start scheduler
         start_scheduler()
 
         logging.info("Telegram bot is starting...")
 
-        # Start polling
         await dp.start_polling(bot)
 
     except Exception:

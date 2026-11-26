@@ -5,6 +5,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import BOT_TOKEN, LOG_LEVEL
 
@@ -14,6 +15,11 @@ from admin import router as admin_router
 from channels import router as channels_router
 from private_channels import router as private_channels_router
 from reports import router as reports_router
+from panels import router as panels_router
+from services import router as services_router
+from order_engine import router as order_engine_router
+from bot_commands import router as bot_commands_router
+from order_commands import router as order_commands_router
 
 from scheduler import start_scheduler, stop_scheduler
 
@@ -34,34 +40,39 @@ async def main():
         )
     )
 
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
 
-    # Register routers
+    # Register all routers
     dp.include_router(admin_router)
+    dp.include_router(bot_commands_router)
     dp.include_router(channels_router)
     dp.include_router(private_channels_router)
+    dp.include_router(panels_router)
+    dp.include_router(services_router)
     dp.include_router(reports_router)
+    dp.include_router(order_commands_router)
+    dp.include_router(order_engine_router)
 
     try:
         logger.info("Initializing database...")
         await init_db()
 
-        logger.info("Checking Telegram bot...")
+        logger.info("Checking Telegram connection...")
         bot_info = await bot.get_me()
 
         logger.info(
-            "Bot connected: @%s | ID: %s",
+            "Connected to bot @%s | ID: %s",
             bot_info.username,
             bot_info.id
         )
 
-        # Start background scheduler
+        # Start background order status checker
         start_scheduler()
 
-        logger.info("Starting Telegram polling...")
-
-        # Remove old webhook before polling
+        # Remove webhook before polling
         await bot.delete_webhook(drop_pending_updates=False)
+
+        logger.info("Starting Telegram polling...")
 
         await dp.start_polling(
             bot,
@@ -73,7 +84,7 @@ async def main():
         raise
 
     finally:
-        logger.info("Stopping bot services...")
+        logger.info("Stopping bot...")
 
         stop_scheduler()
 

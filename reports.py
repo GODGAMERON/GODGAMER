@@ -1,131 +1,203 @@
 
-import logging
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from admin import owner_only
-from database import get_report
-
-logger = logging.getLogger(__name__)
+from config import TIMEZONE
+from database import get_channel, get_report_summary
+from admin_permissions import has_permission
 
 router = Router()
 
+try:
+    LOCAL_TZ = ZoneInfo(TIMEZONE)
+except Exception:
+    LOCAL_TZ = ZoneInfo("Asia/Kolkata")
 
-async def generate_report(
-    message: Message,
-    hours: int,
-    title: str
-):
-    if not await owner_only(message):
-        return
 
-    args = (message.text or "").split()
+async def check_report_permission(message: Message) -> bool:
+    allowed = await has_permission(
+        message.from_user.id,
+        "reports"
+    )
 
-    if len(args) > 2:
+    if not allowed:
         await message.answer(
-            "Usage: /report24 or /report24 @channelusername"
+            "❌ Aapko reports dekhne ki permission nahi hai."
         )
-        return
+        return False
 
-    username = None
+    return True
 
-    if len(args) == 2:
-        username = args[1].strip().lstrip("@").lower()
 
-        if not username:
-            await message.answer("❌ Invalid channel username.")
-            return
+async def resolve_channel(argument: str):
+    argument = argument.strip()
+
+    if argument.startswith("@"):
+        argument = argument[1:]
 
     try:
-        records = await get_report(
-            hours=hours,
-            channel_username=username
-        )
+        numeric_id = int(argument)
+        return await get_channel(numeric_id)
+    except ValueError:
+        return await get_channel(argument)
 
-        if not records:
-            await message.answer(
-                f"📊 {title}\n\nNo activity found."
-            )
+
+def format_report(data, title: str, channel_name=None) -> str:
+    if not data:
+        data = {}
+
+    total_orders = data.get("total_orders", 0) or 0
+    completed = data.get("completed_orders", 0) or 0
+    pending = data.get("pending_orders", 0) or 0
+    failed = data.get("failed_orders", 0) or 0
+    total_quantity = data.get("total_quantity", 0) or 0
+    total_spent = data.get("total_spent", 0) or 0
+
+    text = (
+        f"📊 {title}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    if channel_name:
+        text += f"📢 Channel: {channel_name}\n"
+
+    text += (
+        f"🧾 Total Orders: {total_orders}\n"
+        f"✅ Completed: {completed}\n"
+        f"⏳ Pending: {pending}\n"
+        f"❌ Failed: {failed}\n"
+        f"📦 Total Quantity: {total_quantity}\n"
+        f"💰 Total Spent: {total_spent}\n"
+        "━━━━━━━━━━━━━━━━━━"
+    )
+
+    return text
+
+
+async def send_report(
+    message: Message,
+    hours: int,
+    title: str,
+    channel_argument: str = None
+):
+    if not await check_report_permission(message):
+        return
+
+    channel_id = None
+    channel_name = None
+
+    if channel_argument:
+        channel = await resolve_channel(channel_argument)
+
+        if not channel:
+            await message.answer("❌ Channel database mein nahi mila.")
             return
 
-        lines = [
-            f"📊 <b>{title}</b>",
-            "",
-            f"Total events: {len(records)}",
-        ]
-
-        for record in records[:30]:
-            channel = record["channel_username"]
-            event = record["event_type"]
-            quantity = record["quantity"]
-            created = record["created_at"]
-
-            lines.append(
-                f"\n<b>@{channel}</b>\n"
-                f"Event: {event}\n"
-                f"Quantity: {quantity if quantity is not None else '-'}\n"
-                f"Time: {created.strftime('%d-%m-%Y %H:%M')}"
-            )
-
-        if len(records) > 30:
-            lines.append(
-                f"\nShowing latest 30 of {len(records)} events."
-            )
-
-        await message.answer(
-            "\n".join(lines),
-            parse_mode="HTML"
+        channel_id = channel["id"]
+        channel_name = (
+            channel.get("title")
+            or channel.get("username")
+            or str(channel.get("chat_id"))
         )
 
-    except Exception:
-        logger.exception("Report generation failed")
+    try:
+        data = await get_report_summary(
+            hours=hours,
+            channel_id=channel_id
+        )
+
+        report_text = format_report(
+            data,
+            title,
+            channel_name
+        )
+
+        await message.answer(report_text)
+
+    except Exception as error:
         await message.answer(
-            "❌ Could not generate report. Please try again."
+            "❌ Report generate nahi ho payi.\n"
+            f"Error: {str(error)[:300]}"
         )
 
 
 @router.message(Command("report24"))
-async def report24_command(message: Message):
-    await generate_report(
+async def report_24(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    channel = parts[1] if len(parts) > 1 else None
+
+    await send_report(
         message,
         24,
-        "Last 24 Hours Report"
+        "LAST 24 HOURS REPORT",
+        channel
     )
 
 
 @router.message(Command("report72"))
-async def report72_command(message: Message):
-    await generate_report(
+async def report_72(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    channel = parts[1] if len(parts) > 1 else None
+
+    await send_report(
         message,
         72,
-        "Last 72 Hours Report"
+        "LAST 72 HOURS REPORT",
+        channel
     )
 
 
 @router.message(Command("reportday"))
-async def reportday_command(message: Message):
-    await generate_report(
+async def report_day(message: Message):
+    now = datetime.now(LOCAL_TZ)
+    midnight = now.replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0
+    )
+
+    hours = max(
+        1,
+        int((now - midnight).total_seconds() / 3600) + 1
+    )
+
+    parts = (message.text or "").split(maxsplit=1)
+    channel = parts[1] if len(parts) > 1 else None
+
+    await send_report(
         message,
-        24,
-        "Daily Report"
+        hours,
+        "TODAY REPORT",
+        channel
     )
 
 
 @router.message(Command("reportweek"))
-async def reportweek_command(message: Message):
-    await generate_report(
+async def report_week(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    channel = parts[1] if len(parts) > 1 else None
+
+    await send_report(
         message,
-        168,
-        "Weekly Report"
+        24 * 7,
+        "LAST 7 DAYS REPORT",
+        channel
     )
 
 
 @router.message(Command("reportmonth"))
-async def reportmonth_command(message: Message):
-    await generate_report(
+async def report_month(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    channel = parts[1] if len(parts) > 1 else None
+
+    await send_report(
         message,
-        720,
-        "Monthly Report"
+        24 * 30,
+        "LAST 30 DAYS REPORT",
+        channel
     )

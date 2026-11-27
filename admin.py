@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
+try:
+    OWNER_ID = int(OWNER_ID)
+except (TypeError, ValueError):
+    raise RuntimeError("OWNER_ID must be a valid numeric Telegram ID")
+
 
 # ==========================================
 # ACCESS HELPERS
@@ -37,7 +42,7 @@ async def owner_only(message: Message) -> bool:
     if not message.from_user:
         return False
 
-    if is_owner(message.from_user.id):
+    if message.from_user.id == OWNER_ID:
         return True
 
     await message.answer(
@@ -53,6 +58,9 @@ async def permission_required(
 
     if not message.from_user:
         return False
+
+    if message.from_user.id == OWNER_ID:
+        return True
 
     if await has_permission(
         message.from_user.id,
@@ -91,44 +99,54 @@ async def admin_command(message: Message):
 
     user_id = message.from_user.id
 
-    if not await is_admin(user_id):
-        await message.answer(
-            "❌ Aap Admin nahi hain."
+    try:
+        if user_id == OWNER_ID:
+            role = "👑 Owner"
+            permissions = {
+                permission: True
+                for permission in PERMISSIONS
+            }
+        else:
+            if not await is_admin(user_id):
+                await message.answer(
+                    "❌ Aap Admin nahi hain."
+                )
+                return
+
+            role = "🛡 Admin"
+            permissions = await get_user_permissions(user_id)
+
+        enabled = [
+            name for name, allowed in permissions.items()
+            if allowed
+        ]
+
+        text = (
+            f"{role} <b>Control Panel</b>\n\n"
+            f"🆔 ID: <code>{user_id}</code>\n\n"
+            "<b>Available Permissions:</b>\n"
         )
-        return
 
-    permissions = await get_user_permissions(user_id)
+        if enabled:
+            for permission in enabled:
+                description = PERMISSIONS.get(
+                    permission,
+                    permission
+                )
+                text += f"\n✅ {description}"
+        else:
+            text += "\n❌ Koi permission assigned nahi hai."
 
-    if is_owner(user_id):
-        role = "👑 Owner"
-    else:
-        role = "🛡 Admin"
+        await message.answer(
+            text,
+            parse_mode="HTML"
+        )
 
-    enabled = [
-        name for name, allowed in permissions.items()
-        if allowed
-    ]
-
-    text = (
-        f"{role} <b>Control Panel</b>\n\n"
-        f"🆔 ID: <code>{user_id}</code>\n\n"
-        f"<b>Available Permissions:</b>\n"
-    )
-
-    if enabled:
-        for permission in enabled:
-            description = PERMISSIONS.get(
-                permission,
-                permission
-            )
-            text += f"\n✅ {description}"
-    else:
-        text += "\n❌ Koi permission assigned nahi hai."
-
-    await message.answer(
-        text,
-        parse_mode="HTML"
-    )
+    except Exception:
+        logger.exception("Admin command failed")
+        await message.answer(
+            "❌ Admin information load nahi ho saki."
+        )
 
 
 # ==========================================
@@ -162,7 +180,9 @@ async def add_admin_command(message: Message):
         return
 
     if user_id <= 0:
-        await message.answer("❌ Invalid Telegram ID.")
+        await message.answer(
+            "❌ Invalid Telegram ID."
+        )
         return
 
     if user_id == OWNER_ID:
@@ -172,6 +192,14 @@ async def add_admin_command(message: Message):
         return
 
     try:
+        existing_admin = await get_admin(user_id)
+
+        if existing_admin:
+            await message.answer(
+                "⚠️ Ye user pehle se Admin hai."
+            )
+            return
+
         admin = await add_admin(
             user_id,
             added_by=message.from_user.id
@@ -226,6 +254,12 @@ async def remove_admin_command(message: Message):
         )
         return
 
+    if user_id <= 0:
+        await message.answer(
+            "❌ Invalid Telegram ID."
+        )
+        return
+
     if user_id == OWNER_ID:
         await message.answer(
             "❌ Owner ko remove nahi kiya ja sakta."
@@ -233,6 +267,14 @@ async def remove_admin_command(message: Message):
         return
 
     try:
+        existing_admin = await get_admin(user_id)
+
+        if not existing_admin:
+            await message.answer(
+                "❌ Ye Admin database mein nahi mila."
+            )
+            return
+
         removed = await remove_admin(user_id)
 
         if removed:
@@ -242,7 +284,7 @@ async def remove_admin_command(message: Message):
             )
         else:
             await message.answer(
-                "❌ Ye Admin database mein nahi mila."
+                "❌ Admin remove nahi ho saka."
             )
 
     except Exception:
@@ -290,6 +332,12 @@ async def admin_power_command(message: Message):
         )
         return
 
+    if user_id <= 0:
+        await message.answer(
+            "❌ Invalid Telegram ID."
+        )
+        return
+
     permission = parts[2].lower()
     value = parts[3].lower()
 
@@ -322,11 +370,17 @@ async def admin_power_command(message: Message):
 
         allowed = value == "on"
 
-        await set_admin_permission(
+        result = await set_admin_permission(
             admin["id"],
             permission,
             allowed
         )
+
+        if not result:
+            await message.answer(
+                "❌ Permission database mein update nahi hui."
+            )
+            return
 
         status = "ENABLED ✅" if allowed else "DISABLED ❌"
 
@@ -413,6 +467,12 @@ async def admin_info_command(message: Message):
     try:
         user_id = int(parts[1])
     except ValueError:
+        await message.answer(
+            "❌ Invalid Telegram ID."
+        )
+        return
+
+    if user_id <= 0:
         await message.answer(
             "❌ Invalid Telegram ID."
         )

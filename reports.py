@@ -1,24 +1,32 @@
 
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+import logging
+from datetime import datetime
+from html import escape
 
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from config import TIMEZONE
-from database import get_channel, get_report_summary
+from database import get_report, get_channel
 from admin_permissions import has_permission
 
 router = Router()
+logger = logging.getLogger(__name__)
 
-try:
-    LOCAL_TZ = ZoneInfo(TIMEZONE)
-except Exception:
-    LOCAL_TZ = ZoneInfo("Asia/Kolkata")
+
+REPORT_PERIODS = {
+    "report24": (24, "Last 24 Hours"),
+    "report72": (72, "Last 72 Hours"),
+    "reportday": (24, "Today"),
+    "reportweek": (168, "Last 7 Days"),
+    "reportmonth": (720, "Last 30 Days"),
+}
 
 
 async def check_report_permission(message: Message) -> bool:
+    if not message.from_user:
+        return False
+
     allowed = await has_permission(
         message.from_user.id,
         "reports"
@@ -33,171 +41,176 @@ async def check_report_permission(message: Message) -> bool:
     return True
 
 
-async def resolve_channel(argument: str):
-    argument = argument.strip()
-
-    if argument.startswith("@"):
-        argument = argument[1:]
-
-    try:
-        numeric_id = int(argument)
-        return await get_channel(numeric_id)
-    except ValueError:
-        return await get_channel(argument)
-
-
-def format_report(data, title: str, channel_name=None) -> str:
-    if not data:
-        data = {}
-
-    total_orders = data.get("total_orders", 0) or 0
-    completed = data.get("completed_orders", 0) or 0
-    pending = data.get("pending_orders", 0) or 0
-    failed = data.get("failed_orders", 0) or 0
-    total_quantity = data.get("total_quantity", 0) or 0
-    total_spent = data.get("total_spent", 0) or 0
-
-    text = (
-        f"📊 {title}\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-    )
-
-    if channel_name:
-        text += f"📢 Channel: {channel_name}\n"
-
-    text += (
-        f"🧾 Total Orders: {total_orders}\n"
-        f"✅ Completed: {completed}\n"
-        f"⏳ Pending: {pending}\n"
-        f"❌ Failed: {failed}\n"
-        f"📦 Total Quantity: {total_quantity}\n"
-        f"💰 Total Spent: {total_spent}\n"
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    return text
-
-
-async def send_report(
+async def generate_report(
     message: Message,
     hours: int,
     title: str,
-    channel_argument: str = None
+    channel_username: str = None
 ):
-    if not await check_report_permission(message):
-        return
-
-    channel_id = None
-    channel_name = None
-
-    if channel_argument:
-        channel = await resolve_channel(channel_argument)
-
-        if not channel:
-            await message.answer("❌ Channel database mein nahi mila.")
-            return
-
-        channel_id = channel["id"]
-        channel_name = (
-            channel.get("title")
-            or channel.get("username")
-            or str(channel.get("chat_id"))
-        )
-
     try:
-        data = await get_report_summary(
+        channel_id = None
+
+        if channel_username:
+            channel = await get_channel(channel_username)
+
+            if not channel:
+                await message.answer(
+                    "❌ Ye channel database mein nahi mila."
+                )
+                return
+
+            channel_id = channel["id"]
+
+        events = await get_report(
             hours=hours,
             channel_id=channel_id
         )
 
-        report_text = format_report(
-            data,
-            title,
-            channel_name
+        if not events:
+            await message.answer(
+                f"📊 <b>{escape(title)}</b>\n\n"
+                "Is period mein koi order record nahi mila.",
+                parse_mode="HTML"
+            )
+            return
+
+        total_orders = len(events)
+        total_quantity = sum(
+            int(event.get("quantity") or 0)
+            for event in events
         )
 
-        await message.answer(report_text)
+        status_counts = {}
 
-    except Exception as error:
+        for event in events:
+            status = str(event.get("status") or "unknown").lower()
+            status_counts[status] = status_counts.get(status, 0) + 1
+
+        total_spend = sum(
+            float(event.get("charge") or 0)
+            for event in events
+        )
+
+        channel_text = (
+            f"Channel: @{escape(channel_username)}\n"
+            if channel_username
+            else "Channel: All Channels\n"
+        )
+
+        report = [
+            f"📊 <b>{escape(title)}</b>",
+            "",
+            channel_text.rstrip(),
+            f"Generated: {datetime.now().strftime('%d-%m-%Y %H:%M')}",
+            "",
+            f"📦 Total Orders: <b>{total_orders}</b>",
+            f"🔢 Total Quantity: <b>{total_quantity:,}</b>",
+            f"💰 Total Charge: <b>{total_spend:.4f}</b>",
+            "",
+            "<b>📌 ORDER STATUS</b>"
+        ]
+
+        for status, count in sorted(status_counts.items()):
+            report.append(
+                f"{escape(status.title())}: {count}"
+            )
+
+        report.extend([
+            "",
+            "━━━━━━━━━━━━━━━━━━",
+            "<b>🕒 RECENT ORDERS</b>",
+            "━━━━━━━━━━━━━━━━━━"
+        ])
+
+        for event in events[:15]:
+            created_at = event.get("created_at")
+
+            if created_at:
+                time_text = created_at.strftime("%d-%m %H:%M")
+            else:
+                time_text = "Unknown"
+
+            service_id = escape(str(event.get("service_id") or "-"))
+            order_status = escape(str(event.get("status") or "unknown"))
+            quantity = int(event.get("quantity") or 0)
+
+            report.extend([
+                "",
+                f"Service ID: <code>{service_id}</code>",
+                f"Quantity: {quantity:,}",
+                f"Status: <b>{order_status}</b>",
+                f"Time: {time_text}"
+            ])
+
         await message.answer(
-            "❌ Report generate nahi ho payi.\n"
-            f"Error: {str(error)[:300]}"
+            "\n".join(report),
+            parse_mode="HTML"
+        )
+
+    except Exception:
+        logger.exception("Report generation failed")
+
+        await message.answer(
+            "❌ Report generate nahi ho saki. "
+            "Railway logs check karein."
         )
 
 
-@router.message(Command("report24"))
-async def report_24(message: Message):
-    parts = (message.text or "").split(maxsplit=1)
-    channel = parts[1] if len(parts) > 1 else None
+def register_report_handler(
+    command: str,
+    hours: int,
+    title: str
+):
+    async def handler(message: Message):
 
-    await send_report(
-        message,
-        24,
-        "LAST 24 HOURS REPORT",
-        channel
+        if not await check_report_permission(message):
+            return
+
+        args = (message.text or "").split(maxsplit=1)
+
+        if len(args) > 2:
+            await message.answer(
+                f"Usage:\n/{command}\n/{command} @channel"
+            )
+            return
+
+        channel_username = None
+
+        if len(args) == 2:
+            username = args[1].strip()
+
+            if username.startswith("@"):
+                username = username[1:]
+
+            username = username.rstrip("/").lower()
+
+            if not username.replace("_", "").isalnum():
+                await message.answer(
+                    "❌ Invalid channel username."
+                )
+                return
+
+            channel_username = username
+
+        await generate_report(
+            message=message,
+            hours=hours,
+            title=title,
+            channel_username=channel_username
+        )
+
+    router.message.register(
+        handler,
+        Command(command)
     )
 
 
-@router.message(Command("report72"))
-async def report_72(message: Message):
-    parts = (message.text or "").split(maxsplit=1)
-    channel = parts[1] if len(parts) > 1 else None
-
-    await send_report(
-        message,
-        72,
-        "LAST 72 HOURS REPORT",
-        channel
-    )
-
-
-@router.message(Command("reportday"))
-async def report_day(message: Message):
-    now = datetime.now(LOCAL_TZ)
-    midnight = now.replace(
-        hour=0,
-        minute=0,
-        second=0,
-        microsecond=0
-    )
-
-    hours = max(
-        1,
-        int((now - midnight).total_seconds() / 3600) + 1
-    )
-
-    parts = (message.text or "").split(maxsplit=1)
-    channel = parts[1] if len(parts) > 1 else None
-
-    await send_report(
-        message,
+for command, (hours, title) in REPORT_PERIODS.items():
+    register_report_handler(
+        command,
         hours,
-        "TODAY REPORT",
-        channel
+        title
     )
 
 
-@router.message(Command("reportweek"))
-async def report_week(message: Message):
-    parts = (message.text or "").split(maxsplit=1)
-    channel = parts[1] if len(parts) > 1 else None
-
-    await send_report(
-        message,
-        24 * 7,
-        "LAST 7 DAYS REPORT",
-        channel
-    )
-
-
-@router.message(Command("reportmonth"))
-async def report_month(message: Message):
-    parts = (message.text or "").split(maxsplit=1)
-    channel = parts[1] if len(parts) > 1 else None
-
-    await send_report(
-        message,
-        24 * 30,
-        "LAST 30 DAYS REPORT",
-        channel
-    )
+logger.info("Reports module loaded successfully.")

@@ -9,22 +9,21 @@ logger = logging.getLogger(__name__)
 pool = None
 
 
-# ==========================================
+# =========================================================
 # DATABASE CONNECTION
-# ==========================================
+# =========================================================
 
 async def init_db():
-    """Connect to PostgreSQL and create/update database tables."""
     global pool
+
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL is missing")
 
     if pool is not None:
         return
 
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is missing in Railway Variables.")
-
     pool = await asyncpg.create_pool(
-        dsn=DATABASE_URL,
+        DATABASE_URL,
         min_size=1,
         max_size=10,
         command_timeout=60
@@ -32,96 +31,105 @@ async def init_db():
 
     async with pool.acquire() as conn:
 
-        # ----------------------------------
+        # -------------------------------------------------
         # CHANNELS
-        # ----------------------------------
+        # -------------------------------------------------
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS channels (
                 id BIGSERIAL PRIMARY KEY,
+                channel_username TEXT UNIQUE,
                 chat_id BIGINT UNIQUE,
-                username TEXT UNIQUE,
                 title TEXT,
-                channel_type TEXT NOT NULL DEFAULT 'public',
-                invite_link TEXT,
+                channel_type TEXT DEFAULT 'public',
                 quantity BIGINT NOT NULL DEFAULT 0,
                 is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                automation_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                automation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 added_by BIGINT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
-        # Safe additions for an older channels table.
+        channel_columns = {
+            "chat_id": "BIGINT",
+            "title": "TEXT",
+            "channel_type": "TEXT DEFAULT 'public'",
+            "quantity": "BIGINT NOT NULL DEFAULT 0",
+            "is_active": "BOOLEAN NOT NULL DEFAULT TRUE",
+            "automation_enabled": "BOOLEAN NOT NULL DEFAULT TRUE",
+            "added_by": "BIGINT",
+            "created_at": "TIMESTAMPTZ DEFAULT NOW()",
+            "updated_at": "TIMESTAMPTZ DEFAULT NOW()"
+        }
+
+        for column, definition in channel_columns.items():
+            await conn.execute(
+                f"""
+                ALTER TABLE channels
+                ADD COLUMN IF NOT EXISTS {column} {definition}
+                """
+            )
+
         await conn.execute("""
             ALTER TABLE channels
-                ADD COLUMN IF NOT EXISTS chat_id BIGINT,
-                ADD COLUMN IF NOT EXISTS title TEXT,
-                ADD COLUMN IF NOT EXISTS channel_type TEXT DEFAULT 'public',
-                ADD COLUMN IF NOT EXISTS invite_link TEXT,
-                ADD COLUMN IF NOT EXISTS automation_enabled BOOLEAN DEFAULT FALSE,
-                ADD COLUMN IF NOT EXISTS added_by BIGINT,
-                ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()
+            ALTER COLUMN channel_username DROP NOT NULL
         """)
 
         await conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS
-            idx_channels_chat_id ON channels(chat_id)
+            idx_channels_chat_id
+            ON channels(chat_id)
             WHERE chat_id IS NOT NULL
         """)
 
-        # ----------------------------------
-        # SMM PANELS
-        # ----------------------------------
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_channels_username
+            ON channels(LOWER(channel_username))
+            WHERE channel_username IS NOT NULL
+        """)
+
+        # -------------------------------------------------
+        # QUANTITY EVENTS
+        # -------------------------------------------------
 
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS smm_panels (
+            CREATE TABLE IF NOT EXISTS quantity_events (
                 id BIGSERIAL PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                api_url TEXT NOT NULL,
-                api_key TEXT NOT NULL,
-                is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                last_balance NUMERIC(18, 6),
-                last_checked_at TIMESTAMPTZ,
-                added_by BIGINT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                channel_username TEXT,
+                event_type TEXT NOT NULL,
+                quantity BIGINT,
+                details TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
-        # ----------------------------------
-        # CHANNEL SERVICE ASSIGNMENTS
-        # ----------------------------------
-
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS channel_services (
-                id BIGSERIAL PRIMARY KEY,
-                channel_id BIGINT NOT NULL
-                    REFERENCES channels(id) ON DELETE CASCADE,
-                panel_id BIGINT NOT NULL
-                    REFERENCES smm_panels(id) ON DELETE RESTRICT,
-                service_id TEXT NOT NULL,
-                service_name TEXT,
-                priority INTEGER NOT NULL DEFAULT 1,
-                is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                min_quantity BIGINT,
-                max_quantity BIGINT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                UNIQUE(channel_id, panel_id, service_id)
-            )
+            CREATE INDEX IF NOT EXISTS
+            idx_quantity_events_created
+            ON quantity_events(created_at)
         """)
 
-        # ----------------------------------
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS
+            idx_quantity_events_channel
+            ON quantity_events(channel_username)
+        """)
+
+        # -------------------------------------------------
         # ADMINS
-        # ----------------------------------
+        # -------------------------------------------------
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS admins (
                 id BIGSERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL UNIQUE,
-                added_by BIGINT,
+                user_id BIGINT UNIQUE NOT NULL,
+                username TEXT,
+                full_name TEXT,
                 is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                added_by BIGINT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
@@ -130,16 +138,62 @@ async def init_db():
                 id BIGSERIAL PRIMARY KEY,
                 admin_id BIGINT NOT NULL
                     REFERENCES admins(id) ON DELETE CASCADE,
-                permission TEXT NOT NULL,
-                is_allowed BOOLEAN NOT NULL DEFAULT FALSE,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                UNIQUE(admin_id, permission)
+                channel_management BOOLEAN DEFAULT FALSE,
+                quantity_management BOOLEAN DEFAULT FALSE,
+                reports BOOLEAN DEFAULT FALSE,
+                panel_management BOOLEAN DEFAULT FALSE,
+                service_management BOOLEAN DEFAULT FALSE,
+                order_management BOOLEAN DEFAULT FALSE,
+                admin_management BOOLEAN DEFAULT FALSE,
+                automation_management BOOLEAN DEFAULT FALSE,
+                system_management BOOLEAN DEFAULT FALSE,
+                UNIQUE(admin_id)
             )
         """)
 
-        # ----------------------------------
-        # TELEGRAM POSTS
-        # ----------------------------------
+        # -------------------------------------------------
+        # SMM PANELS
+        # -------------------------------------------------
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS panels (
+                id BIGSERIAL PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                api_url TEXT NOT NULL,
+                api_key TEXT NOT NULL,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                last_balance NUMERIC,
+                added_by BIGINT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        # -------------------------------------------------
+        # CHANNEL SERVICES
+        # -------------------------------------------------
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS channel_services (
+                id BIGSERIAL PRIMARY KEY,
+                channel_id BIGINT NOT NULL
+                    REFERENCES channels(id) ON DELETE CASCADE,
+                panel_id BIGINT NOT NULL
+                    REFERENCES panels(id),
+                service_id BIGINT NOT NULL,
+                service_name TEXT,
+                quantity BIGINT,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                priority INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(channel_id, panel_id, service_id)
+            )
+        """)
+
+        # -------------------------------------------------
+        # CHANNEL POSTS
+        # -------------------------------------------------
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS channel_posts (
@@ -148,82 +202,67 @@ async def init_db():
                     REFERENCES channels(id) ON DELETE CASCADE,
                 telegram_message_id BIGINT NOT NULL,
                 post_url TEXT,
-                posted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                posted_at TIMESTAMPTZ DEFAULT NOW(),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
                 UNIQUE(channel_id, telegram_message_id)
             )
         """)
 
-        # ----------------------------------
+        # -------------------------------------------------
         # ORDERS
-        # ----------------------------------
+        # -------------------------------------------------
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 id BIGSERIAL PRIMARY KEY,
-                channel_id BIGINT NOT NULL
-                    REFERENCES channels(id) ON DELETE RESTRICT,
+                channel_id BIGINT
+                    REFERENCES channels(id) ON DELETE SET NULL,
                 post_id BIGINT
                     REFERENCES channel_posts(id) ON DELETE SET NULL,
                 channel_service_id BIGINT
                     REFERENCES channel_services(id) ON DELETE SET NULL,
                 panel_id BIGINT
-                    REFERENCES smm_panels(id) ON DELETE SET NULL,
-                external_order_id TEXT,
-                service_id TEXT NOT NULL,
+                    REFERENCES panels(id) ON DELETE SET NULL,
+                service_id BIGINT NOT NULL,
                 quantity BIGINT NOT NULL,
-                charge NUMERIC(18, 6) DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'pending',
+                external_order_id TEXT,
+                status TEXT NOT NULL DEFAULT 'submitting',
+                charge NUMERIC,
                 error_message TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
         await conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS
-            idx_orders_post_service
+            idx_orders_post_service_unique
             ON orders(post_id, channel_service_id)
-            WHERE post_id IS NOT NULL
-              AND channel_service_id IS NOT NULL
+            WHERE channel_service_id IS NOT NULL
         """)
 
         await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_orders_created_at
-            ON orders(created_at)
-        """)
-
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_orders_channel_id
-            ON orders(channel_id)
-        """)
-
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_orders_status
+            CREATE INDEX IF NOT EXISTS
+            idx_orders_status
             ON orders(status)
         """)
 
-        # ----------------------------------
-        # QUANTITY CHANGE HISTORY
-        # ----------------------------------
-
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS quantity_logs (
-                id BIGSERIAL PRIMARY KEY,
-                channel_id BIGINT NOT NULL
-                    REFERENCES channels(id) ON DELETE CASCADE,
-                old_quantity BIGINT NOT NULL,
-                new_quantity BIGINT NOT NULL,
-                changed_by BIGINT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
+            CREATE INDEX IF NOT EXISTS
+            idx_orders_created
+            ON orders(created_at DESC)
         """)
 
-    logger.info("PostgreSQL database initialized successfully.")
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS
+            idx_orders_external
+            ON orders(external_order_id)
+        """)
+
+    logger.info("Database initialized successfully.")
 
 
 async def close_db():
-    """Close the PostgreSQL connection pool."""
     global pool
 
     if pool is not None:
@@ -233,503 +272,617 @@ async def close_db():
 
 
 def get_pool():
-    """Return the active database pool."""
     if pool is None:
         raise RuntimeError("Database is not initialized. Call init_db() first.")
 
     return pool
 
 
-async def test_db():
-    """Check database connection."""
-    db = get_pool()
+# =========================================================
+# CHANNEL HELPERS
+# =========================================================
 
-    async with db.acquire() as conn:
-        return await conn.fetchval("SELECT 1")
+def normalize_username(username):
+    if username is None:
+        return None
 
+    username = str(username).strip().lstrip("@").lower()
 
-# ==========================================
-# CHANNEL FUNCTIONS
-# ==========================================
+    return username or None
+
 
 async def add_channel(
     username=None,
     chat_id=None,
     title=None,
     channel_type="public",
-    invite_link=None,
     added_by=None
 ):
-    db = get_pool()
+    """
+    Public channel:
+        add_channel(username)
 
-    async with db.acquire() as conn:
-        return await conn.fetchrow("""
-            INSERT INTO channels (
-                username, chat_id, title, channel_type,
-                invite_link, added_by
-            )
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT DO NOTHING
-            RETURNING *
-        """, username, chat_id, title, channel_type, invite_link, added_by)
+    Private channel:
+        add_channel(
+            chat_id=...,
+            title=...,
+            channel_type="private",
+            added_by=...
+        )
+    """
+
+    if username is not None:
+        username = normalize_username(username)
+
+    if chat_id is not None:
+        chat_id = int(chat_id)
+
+    if username is None and chat_id is None:
+        raise ValueError("Username or chat_id is required.")
+
+    async with get_pool().acquire() as conn:
+
+        async with conn.transaction():
+
+            if chat_id is not None:
+                result = await conn.fetchrow("""
+                    INSERT INTO channels (
+                        channel_username,
+                        chat_id,
+                        title,
+                        channel_type,
+                        is_active,
+                        automation_enabled,
+                        added_by
+                    )
+                    VALUES ($1, $2, $3, $4, TRUE, TRUE, $5)
+                    ON CONFLICT DO NOTHING
+                    RETURNING *
+                """, username, chat_id, title, channel_type, added_by)
+
+            else:
+                result = await conn.fetchrow("""
+                    INSERT INTO channels (
+                        channel_username,
+                        title,
+                        channel_type,
+                        is_active,
+                        automation_enabled,
+                        added_by
+                    )
+                    VALUES ($1, $1, 'public', TRUE, TRUE, $2)
+                    ON CONFLICT DO NOTHING
+                    RETURNING *
+                """, username, added_by)
+
+            if result:
+                await conn.execute("""
+                    INSERT INTO quantity_events (
+                        channel_username,
+                        event_type,
+                        quantity,
+                        details
+                    )
+                    VALUES ($1, 'ADD_CHANNEL', 0, 'Channel added')
+                """, username)
+
+            return result
+
+
+async def remove_channel(identifier):
+    channel = await get_channel(identifier)
+
+    if not channel:
+        return None
+
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+
+            result = await conn.fetchrow("""
+                DELETE FROM channels
+                WHERE id = $1
+                RETURNING *
+            """, channel["id"])
+
+            if result:
+                await conn.execute("""
+                    INSERT INTO quantity_events (
+                        channel_username,
+                        event_type,
+                        quantity,
+                        details
+                    )
+                    VALUES ($1, 'REMOVE_CHANNEL', $2, 'Channel removed')
+                """, result.get("channel_username"), result["quantity"])
+
+            return result
 
 
 async def get_channel(identifier):
-    db = get_pool()
+    async with get_pool().acquire() as conn:
 
-    async with db.acquire() as conn:
         if isinstance(identifier, int):
             return await conn.fetchrow("""
                 SELECT * FROM channels
-                WHERE id = $1 OR chat_id = $1
+                WHERE chat_id = $1 OR id = $1
+                ORDER BY CASE WHEN chat_id = $1 THEN 0 ELSE 1 END
                 LIMIT 1
             """, identifier)
 
-        value = str(identifier).strip().replace("@", "")
+        value = str(identifier).strip()
+
+        try:
+            numeric_id = int(value)
+        except ValueError:
+            numeric_id = None
+
+        if numeric_id is not None:
+            result = await conn.fetchrow("""
+                SELECT * FROM channels
+                WHERE chat_id = $1 OR id = $1
+                ORDER BY CASE WHEN chat_id = $1 THEN 0 ELSE 1 END
+                LIMIT 1
+            """, numeric_id)
+
+            if result:
+                return result
+
+        username = normalize_username(value)
 
         return await conn.fetchrow("""
             SELECT * FROM channels
-            WHERE LOWER(username) = LOWER($1)
-               OR invite_link = $2
-            LIMIT 1
-        """, value, str(identifier).strip())
+            WHERE LOWER(channel_username) = $1
+        """, username)
 
 
 async def get_all_channels(active_only=False):
-    db = get_pool()
+    async with get_pool().acquire() as conn:
 
-    async with db.acquire() as conn:
         if active_only:
             return await conn.fetch("""
                 SELECT * FROM channels
                 WHERE is_active = TRUE
-                ORDER BY id
+                ORDER BY created_at DESC
             """)
 
         return await conn.fetch("""
             SELECT * FROM channels
-            ORDER BY id
+            ORDER BY created_at DESC
         """)
 
 
-async def remove_channel(identifier):
-    db = get_pool()
+async def set_quantity(identifier, quantity):
+    quantity = int(quantity)
 
-    async with db.acquire() as conn:
-        channel = await get_channel(identifier)
+    if quantity < 0:
+        raise ValueError("Quantity cannot be negative.")
 
-        if not channel:
-            return False
+    channel = await get_channel(identifier)
 
-        # Keep historical orders; deactivate the channel.
-        await conn.execute("""
-            UPDATE channels
-            SET is_active = FALSE,
-                automation_enabled = FALSE,
-                updated_at = NOW()
-            WHERE id = $1
-        """, channel["id"])
+    if not channel:
+        return None
 
-        return True
-
-
-async def update_channel_status(identifier, is_active):
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        result = await conn.execute("""
-            UPDATE channels
-            SET is_active = $2,
-                updated_at = NOW()
-            WHERE id = $1
-        """, identifier, is_active)
-
-        return result.endswith("1")
-
-
-async def set_channel_automation(channel_id, enabled):
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        result = await conn.execute("""
-            UPDATE channels
-            SET automation_enabled = $2,
-                updated_at = NOW()
-            WHERE id = $1
-        """, channel_id, enabled)
-
-        return result.endswith("1")
-
-
-# ==========================================
-# QUANTITY FUNCTIONS
-# ==========================================
-
-async def set_quantity(channel_id, quantity, changed_by=None):
-    if not isinstance(quantity, int) or quantity <= 0:
-        raise ValueError("Quantity must be a positive integer.")
-
-    db = get_pool()
-
-    async with db.acquire() as conn:
+    async with get_pool().acquire() as conn:
         async with conn.transaction():
 
-            channel = await conn.fetchrow("""
-                SELECT quantity FROM channels
-                WHERE id = $1
-                FOR UPDATE
-            """, channel_id)
-
-            if not channel:
-                return False
-
-            old_quantity = channel["quantity"]
-
-            await conn.execute("""
+            result = await conn.fetchrow("""
                 UPDATE channels
                 SET quantity = $2,
                     updated_at = NOW()
                 WHERE id = $1
-            """, channel_id, quantity)
+                RETURNING *
+            """, channel["id"], quantity)
+
+            if result:
+                await conn.execute("""
+                    INSERT INTO quantity_events (
+                        channel_username,
+                        event_type,
+                        quantity,
+                        details
+                    )
+                    VALUES ($1, 'SET_QUANTITY', $2, 'Quantity updated')
+                """, result.get("channel_username"), quantity)
+
+            return result
+
+
+async def update_channel_status(identifier, is_active):
+    channel = await get_channel(identifier)
+
+    if not channel:
+        return None
+
+    event_type = "START" if is_active else "STOP"
+
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+
+            result = await conn.fetchrow("""
+                UPDATE channels
+                SET is_active = $2,
+                    automation_enabled = $2,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING *
+            """, channel["id"], bool(is_active))
+
+            if result:
+                await conn.execute("""
+                    INSERT INTO quantity_events (
+                        channel_username,
+                        event_type,
+                        quantity,
+                        details
+                    )
+                    VALUES ($1, $2, $3, $4)
+                """,
+                result.get("channel_username"),
+                event_type,
+                result["quantity"],
+                f"Channel automation {event_type.lower()}")
+
+            return result
+
+
+async def set_channel_automation(channel_id, enabled):
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow("""
+            UPDATE channels
+            SET automation_enabled = $2,
+                is_active = $2,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING *
+        """, channel_id, bool(enabled))
+
+
+# =========================================================
+# REPORTS
+# =========================================================
+
+async def get_report(hours=None, channel_username=None):
+    channel_username = normalize_username(channel_username)
+
+    async with get_pool().acquire() as conn:
+        return await conn.fetch("""
+            SELECT
+                channel_username,
+                event_type,
+                quantity,
+                details,
+                created_at
+            FROM quantity_events
+            WHERE (
+                $1::INTEGER IS NULL
+                OR created_at >= NOW() - ($1 * INTERVAL '1 hour')
+            )
+            AND (
+                $2::TEXT IS NULL
+                OR channel_username = $2
+            )
+            ORDER BY created_at DESC
+        """, hours, channel_username)
+
+
+# =========================================================
+# ADMIN MANAGEMENT
+# =========================================================
+
+async def get_admin(user_id):
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow("""
+            SELECT * FROM admins
+            WHERE user_id = $1
+              AND is_active = TRUE
+        """, int(user_id))
+
+
+async def add_admin(
+    user_id,
+    username=None,
+    full_name=None,
+    added_by=None
+):
+    async with get_pool().acquire() as conn:
+
+        async with conn.transaction():
+
+            admin = await conn.fetchrow("""
+                INSERT INTO admins (
+                    user_id,
+                    username,
+                    full_name,
+                    added_by,
+                    is_active
+                )
+                VALUES ($1, $2, $3, $4, TRUE)
+                ON CONFLICT (user_id)
+                DO UPDATE SET
+                    username = EXCLUDED.username,
+                    full_name = EXCLUDED.full_name,
+                    is_active = TRUE
+                RETURNING *
+            """, int(user_id), username, full_name, added_by)
 
             await conn.execute("""
-                INSERT INTO quantity_logs (
-                    channel_id, old_quantity, new_quantity, changed_by
-                )
-                VALUES ($1, $2, $3, $4)
-            """, channel_id, old_quantity, quantity, changed_by)
+                INSERT INTO admin_permissions (admin_id)
+                VALUES ($1)
+                ON CONFLICT (admin_id) DO NOTHING
+            """, admin["id"])
 
-        return True
-
-
-async def get_quantity(channel_id):
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        return await conn.fetchval("""
-            SELECT quantity FROM channels
-            WHERE id = $1
-        """, channel_id)
+            return admin
 
 
-# ==========================================
-# SMM PANEL FUNCTIONS
-# ==========================================
-
-async def add_panel(name, api_url, api_key, added_by=None):
-    db = get_pool()
-
-    async with db.acquire() as conn:
+async def remove_admin(user_id):
+    async with get_pool().acquire() as conn:
         return await conn.fetchrow("""
-            INSERT INTO smm_panels (
-                name, api_url, api_key, added_by
+            UPDATE admins
+            SET is_active = FALSE
+            WHERE user_id = $1
+            RETURNING *
+        """, int(user_id))
+
+
+async def get_all_admins():
+    async with get_pool().acquire() as conn:
+        return await conn.fetch("""
+            SELECT * FROM admins
+            WHERE is_active = TRUE
+            ORDER BY created_at DESC
+        """)
+
+
+async def get_admin_permissions(admin_id):
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT *
+            FROM admin_permissions
+            WHERE admin_id = $1
+        """, int(admin_id))
+
+        if not row:
+            return {}
+
+        return dict(row)
+
+
+async def set_admin_permissions(admin_id, permissions):
+    allowed = {
+        "channel_management",
+        "quantity_management",
+        "reports",
+        "panel_management",
+        "service_management",
+        "order_management",
+        "admin_management",
+        "automation_management",
+        "system_management"
+    }
+
+    values = {
+        key: bool(permissions.get(key, False))
+        for key in allowed
+    }
+
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow("""
+            INSERT INTO admin_permissions (
+                admin_id,
+                channel_management,
+                quantity_management,
+                reports,
+                panel_management,
+                service_management,
+                order_management,
+                admin_management,
+                automation_management,
+                system_management
             )
-            VALUES ($1, $2, $3, $4)
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+            )
+            ON CONFLICT (admin_id)
+            DO UPDATE SET
+                channel_management = EXCLUDED.channel_management,
+                quantity_management = EXCLUDED.quantity_management,
+                reports = EXCLUDED.reports,
+                panel_management = EXCLUDED.panel_management,
+                service_management = EXCLUDED.service_management,
+                order_management = EXCLUDED.order_management,
+                admin_management = EXCLUDED.admin_management,
+                automation_management = EXCLUDED.automation_management,
+                system_management = EXCLUDED.system_management
+            RETURNING *
+        """,
+        int(admin_id),
+        values["channel_management"],
+        values["quantity_management"],
+        values["reports"],
+        values["panel_management"],
+        values["service_management"],
+        values["order_management"],
+        values["admin_management"],
+        values["automation_management"],
+        values["system_management"])
+
+
+# =========================================================
+# PANEL MANAGEMENT
+# =========================================================
+
+async def add_panel(
+    name,
+    api_url,
+    api_key,
+    added_by=None
+):
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow("""
+            INSERT INTO panels (
+                name,
+                api_url,
+                api_key,
+                added_by,
+                active
+            )
+            VALUES ($1, $2, $3, $4, TRUE)
             ON CONFLICT (name) DO NOTHING
             RETURNING *
         """, name.strip(), api_url.strip(), api_key.strip(), added_by)
 
 
 async def get_panel(panel_id):
-    db = get_pool()
-
-    async with db.acquire() as conn:
+    async with get_pool().acquire() as conn:
         return await conn.fetchrow("""
-            SELECT * FROM smm_panels
+            SELECT * FROM panels
             WHERE id = $1
-        """, panel_id)
+        """, int(panel_id))
 
 
 async def get_panel_by_name(name):
-    db = get_pool()
-
-    async with db.acquire() as conn:
+    async with get_pool().acquire() as conn:
         return await conn.fetchrow("""
-            SELECT * FROM smm_panels
+            SELECT * FROM panels
             WHERE LOWER(name) = LOWER($1)
         """, name.strip())
 
 
 async def get_all_panels(active_only=False):
-    db = get_pool()
+    async with get_pool().acquire() as conn:
 
-    async with db.acquire() as conn:
         if active_only:
             return await conn.fetch("""
-                SELECT id, name, api_url, is_active,
-                       last_balance, last_checked_at, created_at
-                FROM smm_panels
-                WHERE is_active = TRUE
-                ORDER BY name
+                SELECT * FROM panels
+                WHERE active = TRUE
+                ORDER BY id DESC
             """)
 
         return await conn.fetch("""
-            SELECT id, name, api_url, is_active,
-                   last_balance, last_checked_at, created_at
-            FROM smm_panels
-            ORDER BY name
+            SELECT * FROM panels
+            ORDER BY id DESC
         """)
 
 
 async def remove_panel(panel_id):
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        result = await conn.execute("""
-            UPDATE smm_panels
-            SET is_active = FALSE
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow("""
+            UPDATE panels
+            SET active = FALSE,
+                updated_at = NOW()
             WHERE id = $1
-        """, panel_id)
-
-        return result.endswith("1")
+            RETURNING *
+        """, int(panel_id))
 
 
 async def update_panel_balance(panel_id, balance):
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        result = await conn.execute("""
-            UPDATE smm_panels
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow("""
+            UPDATE panels
             SET last_balance = $2,
-                last_checked_at = NOW()
+                updated_at = NOW()
             WHERE id = $1
-        """, panel_id, balance)
+            RETURNING *
+        """, int(panel_id), balance)
 
-        return result.endswith("1")
 
-
-# ==========================================
-# CHANNEL SERVICE FUNCTIONS
-# ==========================================
+# =========================================================
+# CHANNEL SERVICE MANAGEMENT
+# =========================================================
 
 async def add_channel_service(
     channel_id,
     panel_id,
     service_id,
     service_name=None,
-    priority=1,
-    min_quantity=None,
-    max_quantity=None
+    quantity=None
 ):
-    db = get_pool()
-
-    async with db.acquire() as conn:
+    async with get_pool().acquire() as conn:
         return await conn.fetchrow("""
             INSERT INTO channel_services (
-                channel_id, panel_id, service_id, service_name,
-                priority, min_quantity, max_quantity
+                channel_id,
+                panel_id,
+                service_id,
+                service_name,
+                quantity,
+                active
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, TRUE)
             ON CONFLICT (channel_id, panel_id, service_id)
             DO UPDATE SET
                 service_name = EXCLUDED.service_name,
-                priority = EXCLUDED.priority,
-                min_quantity = EXCLUDED.min_quantity,
-                max_quantity = EXCLUDED.max_quantity,
-                is_active = TRUE
+                active = TRUE,
+                updated_at = NOW()
             RETURNING *
-        """, channel_id, panel_id, str(service_id), service_name,
-             priority, min_quantity, max_quantity)
+        """,
+        int(channel_id),
+        int(panel_id),
+        int(service_id),
+        service_name,
+        quantity)
 
 
-async def get_channel_services(channel_id, active_only=True):
-    db = get_pool()
+async def get_channel_services(channel_id, active_only=False):
+    async with get_pool().acquire() as conn:
 
-    async with db.acquire() as conn:
         if active_only:
             return await conn.fetch("""
-                SELECT
-                    cs.*,
-                    sp.name AS panel_name,
-                    sp.is_active AS panel_is_active
-                FROM channel_services cs
-                JOIN smm_panels sp ON sp.id = cs.panel_id
-                WHERE cs.channel_id = $1
-                  AND cs.is_active = TRUE
-                  AND sp.is_active = TRUE
-                ORDER BY cs.priority ASC, cs.id ASC
-            """, channel_id)
+                SELECT * FROM channel_services
+                WHERE channel_id = $1
+                  AND active = TRUE
+                ORDER BY priority, id
+            """, int(channel_id))
 
         return await conn.fetch("""
-            SELECT cs.*, sp.name AS panel_name
-            FROM channel_services cs
-            JOIN smm_panels sp ON sp.id = cs.panel_id
-            WHERE cs.channel_id = $1
-            ORDER BY cs.priority ASC, cs.id ASC
-        """, channel_id)
+            SELECT * FROM channel_services
+            WHERE channel_id = $1
+            ORDER BY priority, id
+        """, int(channel_id))
 
 
 async def remove_channel_service(channel_id, service_id):
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        result = await conn.execute("""
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow("""
             UPDATE channel_services
-            SET is_active = FALSE
+            SET active = FALSE,
+                updated_at = NOW()
             WHERE channel_id = $1
               AND service_id = $2
-        """, channel_id, str(service_id))
-
-        return result.endswith("1")
-
-
-# ==========================================
-# ADMIN FUNCTIONS
-# ==========================================
-
-async def add_admin(user_id, added_by=None):
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        return await conn.fetchrow("""
-            INSERT INTO admins (user_id, added_by)
-            VALUES ($1, $2)
-            ON CONFLICT (user_id)
-            DO UPDATE SET is_active = TRUE
+              AND active = TRUE
             RETURNING *
-        """, user_id, added_by)
+        """, int(channel_id), int(service_id))
 
 
-async def remove_admin(user_id):
-    db = get_pool()
+# =========================================================
+# ORDER MANAGEMENT
+# =========================================================
 
-    async with db.acquire() as conn:
-        result = await conn.execute("""
-            UPDATE admins
-            SET is_active = FALSE
-            WHERE user_id = $1
-        """, user_id)
-
-        return result.endswith("1")
-
-
-async def get_admin(user_id):
-    db = get_pool()
-
-    async with db.acquire() as conn:
+async def get_order(order_id):
+    async with get_pool().acquire() as conn:
         return await conn.fetchrow("""
-            SELECT * FROM admins
-            WHERE user_id = $1 AND is_active = TRUE
-        """, user_id)
+            SELECT * FROM orders
+            WHERE id = $1
+        """, int(order_id))
 
 
-async def get_all_admins():
-    db = get_pool()
+async def get_orders(status=None, limit=20):
+    limit = max(1, min(int(limit), 500))
 
-    async with db.acquire() as conn:
+    async with get_pool().acquire() as conn:
+
+        if status:
+            return await conn.fetch("""
+                SELECT * FROM orders
+                WHERE status = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+            """, status, limit)
+
         return await conn.fetch("""
-            SELECT * FROM admins
-            WHERE is_active = TRUE
-            ORDER BY created_at
-        """)
-
-
-async def set_admin_permission(admin_id, permission, is_allowed):
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        return await conn.fetchrow("""
-            INSERT INTO admin_permissions (
-                admin_id, permission, is_allowed
-            )
-            VALUES ($1, $2, $3)
-            ON CONFLICT (admin_id, permission)
-            DO UPDATE SET
-                is_allowed = EXCLUDED.is_allowed,
-                updated_at = NOW()
-            RETURNING *
-        """, admin_id, permission, is_allowed)
-
-
-async def get_admin_permissions(admin_id):
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT permission, is_allowed
-            FROM admin_permissions
-            WHERE admin_id = $1
-        """, admin_id)
-
-        return {
-            row["permission"]: row["is_allowed"]
-            for row in rows
-        }
-
-
-# ==========================================
-# TELEGRAM POST FUNCTIONS
-# ==========================================
-
-async def record_post(
-    channel_id,
-    telegram_message_id,
-    post_url=None,
-    posted_at=None
-):
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        return await conn.fetchrow("""
-            INSERT INTO channel_posts (
-                channel_id, telegram_message_id, post_url, posted_at
-            )
-            VALUES (
-                $1, $2, $3, COALESCE($4, NOW())
-            )
-            ON CONFLICT (channel_id, telegram_message_id)
-            DO NOTHING
-            RETURNING *
-        """, channel_id, telegram_message_id, post_url, posted_at)
-
-
-async def get_post(channel_id, telegram_message_id):
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        return await conn.fetchrow("""
-            SELECT * FROM channel_posts
-            WHERE channel_id = $1
-              AND telegram_message_id = $2
-        """, channel_id, telegram_message_id)
-
-
-# ==========================================
-# ORDER FUNCTIONS
-# ==========================================
-
-async def create_order(
-    channel_id,
-    service_id,
-    quantity,
-    panel_id=None,
-    post_id=None,
-    channel_service_id=None,
-    external_order_id=None,
-    charge=0,
-    status="pending"
-):
-    if not isinstance(quantity, int) or quantity <= 0:
-        raise ValueError("Order quantity must be a positive integer.")
-
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        return await conn.fetchrow("""
-            INSERT INTO orders (
-                channel_id, post_id, channel_service_id,
-                panel_id, service_id, quantity,
-                external_order_id, charge, status
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (post_id, channel_service_id)
-            WHERE post_id IS NOT NULL
-              AND channel_service_id IS NOT NULL
-            DO NOTHING
-            RETURNING *
-        """, channel_id, post_id, channel_service_id,
-             panel_id, str(service_id), quantity,
-             external_order_id, charge, status)
+            SELECT * FROM orders
+            ORDER BY created_at DESC
+            LIMIT $1
+        """, limit)
 
 
 async def update_order_status(
@@ -739,9 +892,7 @@ async def update_order_status(
     charge=None,
     error_message=None
 ):
-    db = get_pool()
-
-    async with db.acquire() as conn:
+    async with get_pool().acquire() as conn:
         return await conn.fetchrow("""
             UPDATE orders
             SET status = $2,
@@ -752,65 +903,21 @@ async def update_order_status(
                 updated_at = NOW()
             WHERE id = $1
             RETURNING *
-        """, order_id, status, external_order_id,
-             charge, error_message)
+        """,
+        int(order_id),
+        status,
+        external_order_id,
+        charge,
+        error_message)
 
 
-async def get_order(order_id):
-    db = get_pool()
+# =========================================================
+# DATABASE HEALTH
+# =========================================================
 
-    async with db.acquire() as conn:
-        return await conn.fetchrow("""
-            SELECT * FROM orders
-            WHERE id = $1
-        """, order_id)
-
-
-async def get_orders(channel_id=None, status=None, limit=50):
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        return await conn.fetch("""
-            SELECT *
-            FROM orders
-            WHERE ($1::BIGINT IS NULL OR channel_id = $1)
-              AND ($2::TEXT IS NULL OR status = $2)
-            ORDER BY created_at DESC
-            LIMIT $3
-        """, channel_id, status, limit)
-
-
-# ==========================================
-# REPORT FUNCTIONS
-# ==========================================
-
-async def get_report_summary(hours, channel_id=None):
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        return await conn.fetchrow("""
-            SELECT
-                COUNT(*) AS total_orders,
-                COALESCE(SUM(quantity), 0) AS total_quantity,
-                COALESCE(SUM(charge), 0) AS total_spend
-            FROM orders
-            WHERE created_at >= NOW() - ($1 * INTERVAL '1 hour')
-              AND ($2::BIGINT IS NULL OR channel_id = $2)
-        """, hours, channel_id)
-
-
-async def get_report(hours, channel_id=None):
-    """Return individual orders for the requested report period."""
-    db = get_pool()
-
-    async with db.acquire() as conn:
-        return await conn.fetch("""
-            SELECT *
-            FROM orders
-            WHERE created_at >= NOW() - ($1 * INTERVAL '1 hour')
-              AND ($2::BIGINT IS NULL OR channel_id = $2)
-            ORDER BY created_at DESC
-        """, hours, channel_id)
+async def test_db():
+    async with get_pool().acquire() as conn:
+        return await conn.fetchval("SELECT 1")
 
 
 logger.info("Database module loaded.")

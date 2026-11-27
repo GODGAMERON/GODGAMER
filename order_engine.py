@@ -18,16 +18,23 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 
+def is_panel_active(panel):
+    """Support both old and current database field names."""
+
+    if not panel:
+        return False
+
+    return bool(
+        panel.get("active", panel.get("is_active", False))
+    )
+
+
 def make_post_link(chat, message_id):
-    """
-    Public channel post link.
-    Private channel links may not be accessible to SMM panels.
-    """
+    """Create a Telegram post link for public or private channels."""
 
     if chat.username:
         return f"https://t.me/{chat.username}/{message_id}"
 
-    # Telegram private channel internal ID format
     chat_id = str(chat.id)
 
     if chat_id.startswith("-100"):
@@ -39,8 +46,11 @@ def make_post_link(chat, message_id):
 
 async def save_post_once(channel_id, message_id, post_url):
     """
-    Insert post only once.
-    Returns post database ID, or None if already processed.
+    Save a Telegram post only once.
+
+    Returns:
+        Database post ID if inserted.
+        None if the post was already processed.
     """
 
     pool = get_pool()
@@ -76,7 +86,9 @@ async def create_local_order(
     quantity
 ):
     """
-    Create local order record before sending the panel request.
+    Create a local order before contacting the SMM panel.
+
+    This prevents duplicate orders for the same post and service.
     """
 
     pool = get_pool()
@@ -95,7 +107,10 @@ async def create_local_order(
                 created_at,
                 updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, 'submitting', NOW(), NOW())
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                'submitting', NOW(), NOW()
+            )
             ON CONFLICT (post_id, channel_service_id)
             WHERE channel_service_id IS NOT NULL
             DO NOTHING
@@ -105,7 +120,7 @@ async def create_local_order(
             post_id,
             channel_service_id,
             panel_id,
-            service_id,
+            str(service_id),
             quantity
         )
 
@@ -119,6 +134,8 @@ async def update_local_order(
     charge=None,
     error_message=None
 ):
+    """Update local order status and panel response."""
+
     pool = get_pool()
 
     async with pool.acquire() as connection:
@@ -127,7 +144,10 @@ async def update_local_order(
             UPDATE orders
             SET
                 status = $2,
-                external_order_id = COALESCE($3, external_order_id),
+                external_order_id = COALESCE(
+                    $3,
+                    external_order_id
+                ),
                 charge = COALESCE($4, charge),
                 error_message = $5,
                 updated_at = NOW()
@@ -135,7 +155,7 @@ async def update_local_order(
             """,
             order_id,
             status,
-            external_order_id,
+            str(external_order_id) if external_order_id is not None else None,
             charge,
             error_message
         )
@@ -148,29 +168,16 @@ async def place_order_for_service(
     post_url,
     quantity
 ):
+    """Place one independent order for one assigned service."""
+
     service_id = int(service["service_id"])
     panel_id = int(service["panel_id"])
-
-    if not post_url:
-        logger.warning(
-            "No usable post link for channel %s",
-            channel["id"]
-        )
-        return
-
-    panel = await get_panel(panel_id)
-
-    if not panel or not panel.get("active"):
-        logger.error(
-            "Assigned panel %s is unavailable",
-            panel_id
-        )
-        return
+    channel_service_id = int(service["id"])
 
     local_order_id = await create_local_order(
         post_id=post_id,
         channel_id=channel["id"],
-        channel_service_id=service["id"],
+        channel_service_id=channel_service_id,
         panel_id=panel_id,
         service_id=service_id,
         quantity=quantity
@@ -178,16 +185,34 @@ async def place_order_for_service(
 
     if not local_order_id:
         logger.info(
-            "Order already exists for post %s and service %s",
+            "Duplicate order ignored: post=%s service=%s",
             post_id,
             service_id
         )
         return
 
     try:
+        if not post_url:
+            raise ValueError("Telegram post link is unavailable.")
+
+        panel = await get_panel(panel_id)
+
+        if not panel or not is_panel_active(panel):
+            raise ValueError(
+                f"Panel {panel_id} is unavailable or inactive."
+            )
+
+        api_url = panel.get("api_url")
+        api_key = panel.get("api_key")
+
+        if not api_url or not api_key:
+            raise ValueError(
+                f"Panel {panel_id} API configuration is incomplete."
+            )
+
         api = SMMApi(
-            api_url=panel["api_url"],
-            api_key=panel["api_key"]
+            api_url=api_url,
+            api_key=api_key
         )
 
         result = await api.add_order(
@@ -196,7 +221,12 @@ async def place_order_for_service(
             quantity=quantity
         )
 
-        external_id = result["order"]
+        external_id = result.get("order")
+
+        if not external_id:
+            raise ValueError(
+                "Panel did not return an external order ID."
+            )
 
         await update_local_order(
             order_id=local_order_id,
@@ -206,29 +236,41 @@ async def place_order_for_service(
         )
 
         logger.info(
-            "Order created: local=%s external=%s quantity=%s",
+            "SMM order placed successfully: "
+            "local=%s external=%s channel=%s "
+            "service=%s quantity=%s",
             local_order_id,
             external_id,
+            channel["id"],
+            service_id,
             quantity
         )
 
     except Exception as error:
         logger.exception(
-            "Panel order failed for local order %s",
-            local_order_id
+            "Order placement failed: local_order=%s service=%s",
+            local_order_id,
+            service_id
         )
 
-        await update_local_order(
-            order_id=local_order_id,
-            status="failed",
-            error_message=str(error)[:1000]
-        )
+        try:
+            await update_local_order(
+                order_id=local_order_id,
+                status="failed",
+                error_message=str(error)[:1000]
+            )
+        except Exception:
+            logger.exception(
+                "Could not update failed order %s",
+                local_order_id
+            )
 
 
 @router.channel_post()
 async def handle_new_channel_post(message: Message):
     """
-    Automatically process every new channel post.
+    Automatically place independent SMM orders
+    for every new post in a registered channel.
     """
 
     chat = message.chat
@@ -241,23 +283,44 @@ async def handle_new_channel_post(message: Message):
 
         if not channel:
             logger.info(
-                "Unregistered channel post received: %s",
+                "Unregistered channel post: %s",
                 chat.id
             )
             return
 
         if not channel.get("is_active"):
+            logger.info(
+                "Inactive channel ignored: %s",
+                chat.id
+            )
             return
 
         if not channel.get("automation_enabled"):
+            logger.info(
+                "Automation disabled for channel: %s",
+                chat.id
+            )
             return
 
         quantity = int(channel.get("quantity") or 0)
 
         if quantity <= 0:
             logger.warning(
-                "Quantity not configured for channel %s",
+                "Invalid quantity for channel %s",
                 chat.id
+            )
+            return
+
+        post_url = make_post_link(
+            chat,
+            message.message_id
+        )
+
+        if not post_url:
+            logger.error(
+                "Could not create post link: channel=%s message=%s",
+                chat.id,
+                message.message_id
             )
             return
 
@@ -272,11 +335,6 @@ async def handle_new_channel_post(message: Message):
                 chat.id
             )
             return
-
-        post_url = make_post_link(
-            chat,
-            message.message_id
-        )
 
         post_id = await save_post_once(
             channel_id=channel["id"],
@@ -293,14 +351,17 @@ async def handle_new_channel_post(message: Message):
             return
 
         logger.info(
-            "New post detected: channel=%s message=%s services=%s",
+            "New post detected: channel=%s message=%s "
+            "services=%s quantity=%s",
             chat.id,
             message.message_id,
-            len(services)
+            len(services),
+            quantity
         )
 
-        # Each assigned service gets its own independent order.
-        # One failed service does not stop the remaining services.
+        # Each service is processed independently.
+        # A failure in one service will not stop other services.
+
         for service in services:
             try:
                 await place_order_for_service(
@@ -313,13 +374,18 @@ async def handle_new_channel_post(message: Message):
 
             except Exception:
                 logger.exception(
-                    "Service processing failed: channel=%s service=%s",
+                    "Service processing error: "
+                    "channel=%s service=%s",
                     chat.id,
                     service.get("service_id")
                 )
 
     except Exception:
         logger.exception(
-            "New channel post processing failed for chat %s",
-            chat.id
+            "Channel post processing failed: chat=%s message=%s",
+            chat.id,
+            message.message_id
         )
+
+
+logger.info("Order engine loaded successfully.")

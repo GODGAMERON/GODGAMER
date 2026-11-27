@@ -55,9 +55,6 @@ if not DATABASE_URL:
 # OPTIONAL LEGACY SMM API CONFIGURATION
 # ==========================================
 
-# New multi-panel system will store each panel's
-# API URL and API key separately in PostgreSQL.
-
 SMM_API_URL = os.getenv("SMM_API_URL", "").strip()
 SMM_API_KEY = os.getenv("SMM_API_KEY", "").strip()
 
@@ -66,9 +63,15 @@ SMM_API_KEY = os.getenv("SMM_API_KEY", "").strip()
 # GENERAL BOT SETTINGS
 # ==========================================
 
-TIMEZONE = os.getenv("TIMEZONE", "Asia/Kolkata").strip()
+TIMEZONE = os.getenv(
+    "TIMEZONE",
+    "Asia/Kolkata"
+).strip()
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = os.getenv(
+    "LOG_LEVEL",
+    "INFO"
+).strip().upper()
 
 VALID_LOG_LEVELS = {
     "DEBUG",
@@ -86,14 +89,42 @@ if LOG_LEVEL not in VALID_LOG_LEVELS:
 # AUTOMATION SETTINGS
 # ==========================================
 
-DEFAULT_QUANTITY = 500
+def get_positive_int(name: str, default: int) -> int:
+    value = os.getenv(name, str(default)).strip()
 
-# A new post can trigger its own order.
-# Pending orders do not block orders for new posts.
+    try:
+        result = int(value)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{name} must be a valid integer."
+        ) from exc
 
-MAX_ORDER_RETRIES = 3
+    if result <= 0:
+        raise RuntimeError(
+            f"{name} must be greater than zero."
+        )
 
-ORDER_STATUS_CHECK_SECONDS = 60
+    return result
 
+
+DEFAULT_QUANTITY = get_positive_int(
+    "DEFAULT_QUANTITY",
+    500
+)
+
+MAX_ORDER_RETRIES = get_positive_int(
+    "MAX_ORDER_RETRIES",
+    3
+)
+
+ORDER_STATUS_CHECK_SECONDS = get_positive_int(
+    "ORDER_STATUS_CHECK_SECONDS",
+    60
+)
+
+
+# ==========================================
+# CONFIGURATION LOADED
+# ==========================================
 
 logger.info("Configuration loaded successfully.")

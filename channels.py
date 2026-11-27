@@ -27,8 +27,6 @@ router = Router()
 # ==========================================
 
 def clean_username(value: str):
-    """Extract and validate a public Telegram channel username."""
-
     value = value.strip()
 
     value = re.sub(
@@ -47,7 +45,7 @@ def clean_username(value: str):
     if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", value):
         return None
 
-    return value
+    return value.lower()
 
 
 async def check_permission(
@@ -58,18 +56,16 @@ async def check_permission(
     if not message.from_user:
         return False
 
-    allowed = await has_permission(
+    if await has_permission(
         message.from_user.id,
         permission
+    ):
+        return True
+
+    await message.answer(
+        "❌ Aapko is command ki permission nahi hai."
     )
-
-    if not allowed:
-        await message.answer(
-            "❌ Aapko is command ki permission nahi hai."
-        )
-        return False
-
-    return True
+    return False
 
 
 # ==========================================
@@ -79,10 +75,7 @@ async def check_permission(
 @router.message(Command("addchannel"))
 async def add_channel_command(message: Message):
 
-    if not await check_permission(
-        message,
-        "channel_management"
-    ):
+    if not await check_permission(message, "channel_management"):
         return
 
     parts = (message.text or "").split(maxsplit=1)
@@ -90,9 +83,7 @@ async def add_channel_command(message: Message):
     if len(parts) != 2:
         await message.answer(
             "❌ Command format:\n"
-            "<code>/addchannel @channel</code>\n\n"
-            "Example:\n"
-            "<code>/addchannel @examplechannel</code>",
+            "<code>/addchannel @channel</code>",
             parse_mode="HTML"
         )
         return
@@ -101,8 +92,7 @@ async def add_channel_command(message: Message):
 
     if not username:
         await message.answer(
-            "❌ Invalid public channel username.\n\n"
-            "Username ya public t.me link enter karein."
+            "❌ Invalid public channel username."
         )
         return
 
@@ -115,10 +105,7 @@ async def add_channel_command(message: Message):
             )
             return
 
-        # Resolve public Telegram channel information.
-        chat = await message.bot.get_chat(
-            f"@{username}"
-        )
+        chat = await message.bot.get_chat(f"@{username}")
 
         if chat.type != "channel":
             await message.answer(
@@ -136,8 +123,7 @@ async def add_channel_command(message: Message):
 
         if not result:
             await message.answer(
-                "❌ Channel save nahi ho saka. "
-                "Ho sakta hai ye channel pehle se added ho."
+                "❌ Channel database mein save nahi ho saka."
             )
             return
 
@@ -145,19 +131,20 @@ async def add_channel_command(message: Message):
             "✅ <b>Channel Added Successfully!</b>\n\n"
             f"📢 Channel: @{username}\n"
             f"📝 Title: {chat.title}\n"
-            f"🆔 Chat ID: <code>{chat.id}</code>\n\n"
-            "⚠️ Automatic post monitoring ke liye "
-            "bot ko channel ka administrator banayein.",
+            f"🆔 Chat ID: <code>{chat.id}</code>\n"
+            "📌 Status: 🟢 Active\n"
+            "🤖 Automation: ⏸ OFF\n\n"
+            "Bot ko channel administrator banayein.\n"
+            "Quantity aur service configure karne ke baad "
+            "/startqty command chalayein.",
             parse_mode="HTML"
         )
 
     except Exception:
         logger.exception("Add channel failed")
-
         await message.answer(
-            "❌ Channel add nahi ho saka.\n\n"
-            "Check karein ki channel public hai "
-            "aur Telegram username sahi hai."
+            "❌ Channel add nahi ho saka. "
+            "Username aur bot access check karein."
         )
 
 
@@ -168,10 +155,7 @@ async def add_channel_command(message: Message):
 @router.message(Command("removechannel"))
 async def remove_channel_command(message: Message):
 
-    if not await check_permission(
-        message,
-        "channel_management"
-    ):
+    if not await check_permission(message, "channel_management"):
         return
 
     parts = (message.text or "").split(maxsplit=1)
@@ -201,15 +185,13 @@ async def remove_channel_command(message: Message):
             )
             return
 
-        removed = await remove_channel(
-            channel["id"]
-        )
+        removed = await remove_channel(channel["id"])
 
         if removed:
             await message.answer(
                 "✅ Channel successfully deactivated.\n\n"
-                "📢 Channel: @" + username + "\n\n"
-                "📊 Purane orders aur reports database mein safe rahenge."
+                f"📢 Channel: @{username}\n\n"
+                "Purane orders aur reports database mein safe rahenge."
             )
         else:
             await message.answer(
@@ -218,7 +200,6 @@ async def remove_channel_command(message: Message):
 
     except Exception:
         logger.exception("Remove channel failed")
-
         await message.answer(
             "❌ Channel remove karte waqt error aaya."
         )
@@ -231,10 +212,7 @@ async def remove_channel_command(message: Message):
 @router.message(Command("channels"))
 async def channels_command(message: Message):
 
-    if not await check_permission(
-        message,
-        "channel_management"
-    ):
+    if not await check_permission(message, "channel_management"):
         return
 
     try:
@@ -246,12 +224,9 @@ async def channels_command(message: Message):
             )
             return
 
-        text = "<b>📢 CHANNEL LIST</b>\n\n"
+        response = "<b>📢 CHANNEL LIST</b>\n\n"
 
-        for index, channel in enumerate(
-            channels,
-            start=1
-        ):
+        for index, channel in enumerate(channels, start=1):
 
             username = (
                 f"@{channel['username']}"
@@ -271,7 +246,7 @@ async def channels_command(message: Message):
                 else "⏸ OFF"
             )
 
-            text += (
+            response += (
                 f"<b>{index}. {channel['title'] or username}</b>\n"
                 f"📢 {username}\n"
                 f"🔢 Quantity: {channel['quantity']}\n"
@@ -280,13 +255,12 @@ async def channels_command(message: Message):
             )
 
         await message.answer(
-            text,
+            response,
             parse_mode="HTML"
         )
 
     except Exception:
         logger.exception("Channel list failed")
-
         await message.answer(
             "❌ Channel list load nahi ho saki."
         )
@@ -299,10 +273,7 @@ async def channels_command(message: Message):
 @router.message(Command("channelinfo"))
 async def channel_info_command(message: Message):
 
-    if not await check_permission(
-        message,
-        "channel_management"
-    ):
+    if not await check_permission(message, "channel_management"):
         return
 
     parts = (message.text or "").split(maxsplit=1)
@@ -327,9 +298,7 @@ async def channel_info_command(message: Message):
         channel = await get_channel(username)
 
         if not channel:
-            await message.answer(
-                "❌ Channel nahi mila."
-            )
+            await message.answer("❌ Channel nahi mila.")
             return
 
         status = (
@@ -355,14 +324,10 @@ async def channel_info_command(message: Message):
             f"🤖 Automation: {automation}"
         )
 
-        await message.answer(
-            text,
-            parse_mode="HTML"
-        )
+        await message.answer(text, parse_mode="HTML")
 
     except Exception:
         logger.exception("Channel info failed")
-
         await message.answer(
             "❌ Channel information load nahi ho saki."
         )
@@ -375,17 +340,14 @@ async def channel_info_command(message: Message):
 @router.message(Command("setqty"))
 async def set_quantity_command(message: Message):
 
-    if not await check_permission(
-        message,
-        "quantity_management"
-    ):
+    if not await check_permission(message, "quantity_management"):
         return
 
     parts = (message.text or "").split()
 
     if len(parts) != 3:
         await message.answer(
-            "❌ Command format:\n"
+            "Command format:\n"
             "<code>/setqty @channel 500</code>",
             parse_mode="HTML"
         )
@@ -436,7 +398,6 @@ async def set_quantity_command(message: Message):
 
     except Exception:
         logger.exception("Set quantity failed")
-
         await message.answer(
             "❌ Quantity update karte waqt error aaya."
         )
@@ -449,10 +410,7 @@ async def set_quantity_command(message: Message):
 @router.message(Command("getqty"))
 async def get_quantity_command(message: Message):
 
-    if not await check_permission(
-        message,
-        "quantity_management"
-    ):
+    if not await check_permission(message, "quantity_management"):
         return
 
     parts = (message.text or "").split(maxsplit=1)
@@ -468,29 +426,23 @@ async def get_quantity_command(message: Message):
     username = clean_username(parts[1])
 
     if not username:
-        await message.answer(
-            "❌ Invalid channel username."
-        )
+        await message.answer("❌ Invalid channel username.")
         return
 
     try:
         channel = await get_channel(username)
 
         if not channel:
-            await message.answer(
-                "❌ Channel nahi mila."
-            )
+            await message.answer("❌ Channel nahi mila.")
             return
 
         await message.answer(
             f"📢 Channel: @{username}\n"
-            f"🔢 Quantity: {channel['quantity']}",
-            parse_mode="HTML"
+            f"🔢 Quantity: {channel['quantity']}"
         )
 
     except Exception:
         logger.exception("Get quantity failed")
-
         await message.answer(
             "❌ Quantity load nahi ho saki."
         )
@@ -503,10 +455,7 @@ async def get_quantity_command(message: Message):
 @router.message(Command("startqty"))
 async def start_quantity_command(message: Message):
 
-    if not await check_permission(
-        message,
-        "automation_management"
-    ):
+    if not await check_permission(message, "automation_management"):
         return
 
     parts = (message.text or "").split(maxsplit=1)
@@ -522,23 +471,19 @@ async def start_quantity_command(message: Message):
     username = clean_username(parts[1])
 
     if not username:
-        await message.answer(
-            "❌ Invalid channel username."
-        )
+        await message.answer("❌ Invalid channel username.")
         return
 
     try:
         channel = await get_channel(username)
 
         if not channel:
-            await message.answer(
-                "❌ Channel nahi mila."
-            )
+            await message.answer("❌ Channel nahi mila.")
             return
 
         if not channel["is_active"]:
             await message.answer(
-                "❌ Ye channel inactive hai. Pehle ise active karein."
+                "❌ Ye channel inactive hai."
             )
             return
 
@@ -558,14 +503,13 @@ async def start_quantity_command(message: Message):
                 "✅ <b>Automation Enabled!</b>\n\n"
                 f"📢 Channel: @{username}\n"
                 f"🔢 Quantity: {channel['quantity']}\n\n"
-                "Naye posts par automatic orders ke liye "
-                "channel service configure hona bhi zaroori hai.",
+                "Naye posts par orders ke liye service "
+                "assignment bhi zaroori hai.",
                 parse_mode="HTML"
             )
 
     except Exception:
         logger.exception("Start automation failed")
-
         await message.answer(
             "❌ Automation start nahi ho saki."
         )
@@ -578,10 +522,7 @@ async def start_quantity_command(message: Message):
 @router.message(Command("stopqty"))
 async def stop_quantity_command(message: Message):
 
-    if not await check_permission(
-        message,
-        "automation_management"
-    ):
+    if not await check_permission(message, "automation_management"):
         return
 
     parts = (message.text or "").split(maxsplit=1)
@@ -597,18 +538,14 @@ async def stop_quantity_command(message: Message):
     username = clean_username(parts[1])
 
     if not username:
-        await message.answer(
-            "❌ Invalid channel username."
-        )
+        await message.answer("❌ Invalid channel username.")
         return
 
     try:
         channel = await get_channel(username)
 
         if not channel:
-            await message.answer(
-                "❌ Channel nahi mila."
-            )
+            await message.answer("❌ Channel nahi mila.")
             return
 
         success = await set_channel_automation(
@@ -621,14 +558,12 @@ async def stop_quantity_command(message: Message):
                 "⏸ <b>Automation Disabled!</b>\n\n"
                 f"📢 Channel: @{username}\n\n"
                 "Naye posts par automatic orders nahi lagenge. "
-                "Pehle se placed orders panel par apne status ke "
-                "according continue rahenge.",
+                "Pehle se placed orders continue rahenge.",
                 parse_mode="HTML"
             )
 
     except Exception:
         logger.exception("Stop automation failed")
-
         await message.answer(
             "❌ Automation stop nahi ho saki."
         )

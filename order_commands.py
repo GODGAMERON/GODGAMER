@@ -1,16 +1,35 @@
 
+import logging
+from html import escape
+
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from database import get_order, get_orders, update_order_status, get_panel
+from database import (
+    get_order,
+    get_orders,
+    update_order_status,
+    get_panel,
+)
+
 from admin_permissions import has_permission
 from smm_api import SMMApi
 
-router = Router()
 
+router = Router()
+logger = logging.getLogger(__name__)
+
+
+# ==========================================
+# ORDER PERMISSION
+# ==========================================
 
 async def order_permission(message: Message) -> bool:
+
+    if not message.from_user:
+        return False
+
     allowed = await has_permission(
         message.from_user.id,
         "order_management"
@@ -25,8 +44,37 @@ async def order_permission(message: Message) -> bool:
     return True
 
 
+# ==========================================
+# STATUS MAPPING
+# ==========================================
+
+STATUS_MAP = {
+    "pending": "pending",
+    "in progress": "in_progress",
+    "in_progress": "in_progress",
+    "processing": "in_progress",
+    "completed": "completed",
+    "partial": "partial",
+    "canceled": "cancelled",
+    "cancelled": "cancelled",
+    "failed": "failed",
+}
+
+
+def normalize_status(status):
+
+    return STATUS_MAP.get(
+        str(status or "").strip().lower()
+    )
+
+
+# ==========================================
+# RECENT ORDERS
+# ==========================================
+
 @router.message(Command("orders"))
 async def orders_command(message: Message):
+
     if not await order_permission(message):
         return
 
@@ -34,31 +82,45 @@ async def orders_command(message: Message):
         orders = await get_orders(limit=20)
 
         if not orders:
-            await message.answer("Abhi koi order nahi hai.")
+            await message.answer(
+                "📦 Abhi database mein koi order nahi hai."
+            )
             return
 
-        output = "📦 RECENT ORDERS\n━━━━━━━━━━━━━━━━━━\n"
+        output = (
+            "📦 <b>RECENT ORDERS</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+        )
 
         for order in orders:
+
             output += (
-                f"\nOrder ID: {order['id']}\n"
-                f"Service ID: {order['service_id']}\n"
-                f"Quantity: {order['quantity']}\n"
-                f"Status: {order['status']}\n"
-                f"External ID: {order.get('external_order_id') or 'N/A'}\n"
-                "------------------\n"
+                f"\n<b>Order ID:</b> {order['id']}\n"
+                f"<b>Service:</b> {escape(str(order['service_id']))}\n"
+                f"<b>Quantity:</b> {order['quantity']}\n"
+                f"<b>Status:</b> {escape(str(order['status']))}\n"
+                f"<b>External ID:</b> "
+                f"{escape(str(order.get('external_order_id') or 'N/A'))}\n"
+                "━━━━━━━━━━━━━━━━━━\n"
             )
 
         await message.answer(output[:4000])
 
-    except Exception as error:
+    except Exception:
+        logger.exception("Recent orders command failed.")
+
         await message.answer(
-            f"❌ Orders error: {str(error)[:300]}"
+            "❌ Orders load nahi ho paaye. Logs check karein."
         )
 
 
+# ==========================================
+# PENDING ORDERS
+# ==========================================
+
 @router.message(Command("pendingorders"))
 async def pending_orders_command(message: Message):
+
     if not await order_permission(message):
         return
 
@@ -69,88 +131,133 @@ async def pending_orders_command(message: Message):
         )
 
         if not orders:
-            await message.answer("✅ Koi pending order nahi hai.")
+            await message.answer(
+                "✅ Koi pending order nahi hai."
+            )
             return
 
-        output = "⏳ PENDING ORDERS\n━━━━━━━━━━━━━━━━━━\n"
+        output = (
+            "⏳ <b>PENDING ORDERS</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+        )
 
         for order in orders:
+
             output += (
-                f"\nLocal ID: {order['id']}\n"
-                f"External ID: {order.get('external_order_id') or 'N/A'}\n"
-                f"Service ID: {order['service_id']}\n"
-                f"Quantity: {order['quantity']}\n"
-                "------------------\n"
+                f"\n<b>Local ID:</b> {order['id']}\n"
+                f"<b>External ID:</b> "
+                f"{escape(str(order.get('external_order_id') or 'N/A'))}\n"
+                f"<b>Service ID:</b> {escape(str(order['service_id']))}\n"
+                f"<b>Quantity:</b> {order['quantity']}\n"
+                "━━━━━━━━━━━━━━━━━━\n"
             )
 
         await message.answer(output[:4000])
 
-    except Exception as error:
+    except Exception:
+        logger.exception("Pending orders command failed.")
+
         await message.answer(
-            f"❌ Pending orders error: {str(error)[:300]}"
+            "❌ Pending orders load nahi ho paaye."
         )
 
+
+# ==========================================
+# ORDER INFORMATION
+# ==========================================
 
 @router.message(Command("orderinfo"))
 async def order_info_command(message: Message):
+
     if not await order_permission(message):
         return
 
     parts = (message.text or "").split()
 
     if len(parts) != 2:
-        await message.answer("Format:\n/orderinfo ORDER_ID")
+        await message.answer(
+            "Format:\n/orderinfo ORDER_ID"
+        )
         return
 
     try:
         order_id = int(parts[1])
+
+        if order_id <= 0:
+            await message.answer("❌ Invalid Order ID.")
+            return
+
         order = await get_order(order_id)
 
         if not order:
-            await message.answer("❌ Order nahi mila.")
+            await message.answer(
+                "❌ Order nahi mila."
+            )
             return
 
-        await message.answer(
-            "ℹ️ ORDER INFORMATION\n"
+        output = (
+            "ℹ️ <b>ORDER INFORMATION</b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            f"Local ID: {order['id']}\n"
-            f"External ID: {order.get('external_order_id') or 'N/A'}\n"
-            f"Channel ID: {order['channel_id']}\n"
-            f"Service ID: {order['service_id']}\n"
-            f"Panel ID: {order['panel_id']}\n"
-            f"Quantity: {order['quantity']}\n"
-            f"Status: {order['status']}\n"
-            f"Charge: {order.get('charge') or 'N/A'}\n"
-            f"Error: {order.get('error_message') or 'None'}\n"
+            f"<b>Local ID:</b> {order['id']}\n"
+            f"<b>External ID:</b> "
+            f"{escape(str(order.get('external_order_id') or 'N/A'))}\n"
+            f"<b>Channel ID:</b> {order['channel_id']}\n"
+            f"<b>Service ID:</b> {escape(str(order['service_id']))}\n"
+            f"<b>Panel ID:</b> {order.get('panel_id') or 'N/A'}\n"
+            f"<b>Quantity:</b> {order['quantity']}\n"
+            f"<b>Status:</b> {escape(str(order['status']))}\n"
+            f"<b>Charge:</b> {escape(str(order.get('charge') or 'N/A'))}\n"
+            f"<b>Error:</b> "
+            f"{escape(str(order.get('error_message') or 'None'))}\n"
             "━━━━━━━━━━━━━━━━━━"
         )
 
-    except ValueError:
-        await message.answer("❌ Order ID number mein bhejein.")
+        await message.answer(output[:4000])
 
-    except Exception as error:
+    except ValueError:
         await message.answer(
-            f"❌ Order info error: {str(error)[:300]}"
+            "❌ Order ID number mein bhejein."
+        )
+
+    except Exception:
+        logger.exception("Order information command failed.")
+
+        await message.answer(
+            "❌ Order information load nahi ho payi."
         )
 
 
+# ==========================================
+# CHECK ORDER STATUS
+# ==========================================
+
 @router.message(Command("checkorder"))
 async def check_order_command(message: Message):
+
     if not await order_permission(message):
         return
 
     parts = (message.text or "").split()
 
     if len(parts) != 2:
-        await message.answer("Format:\n/checkorder ORDER_ID")
+        await message.answer(
+            "Format:\n/checkorder ORDER_ID"
+        )
         return
 
     try:
         order_id = int(parts[1])
+
+        if order_id <= 0:
+            await message.answer("❌ Invalid Order ID.")
+            return
+
         order = await get_order(order_id)
 
         if not order:
-            await message.answer("❌ Order nahi mila.")
+            await message.answer(
+                "❌ Order nahi mila."
+            )
             return
 
         external_id = order.get("external_order_id")
@@ -171,69 +278,90 @@ async def check_order_command(message: Message):
             return
 
         api = SMMApi(
-            panel["api_url"],
-            panel["api_key"]
+            api_url=panel["api_url"],
+            api_key=panel["api_key"]
         )
 
-        result = await api.get_order_status(str(external_id))
+        result = await api.get_order_status(
+            str(external_id)
+        )
 
         raw_status = str(
             result.get("status", "")
         ).strip().lower()
 
-        status_map = {
-            "pending": "pending",
-            "in progress": "in_progress",
-            "processing": "in_progress",
-            "completed": "completed",
-            "partial": "partial",
-            "canceled": "cancelled",
-            "cancelled": "cancelled",
-            "failed": "failed",
-        }
-
-        new_status = status_map.get(raw_status)
+        new_status = normalize_status(raw_status)
 
         if new_status:
+
             await update_order_status(
-                order_id,
-                new_status
+                order_id=order_id,
+                status=new_status
             )
 
+        else:
+            logger.warning(
+                "Unknown panel status for order %s: %s",
+                order_id,
+                raw_status
+            )
+
+        database_status = new_status or order["status"]
+
         await message.answer(
-            "🔄 ORDER STATUS CHECK\n\n"
-            f"Local Order: {order_id}\n"
-            f"Panel Order: {external_id}\n"
-            f"Panel Status: {raw_status or 'Unknown'}\n"
-            f"Database Status: {new_status or order['status']}"
+            "🔄 <b>ORDER STATUS CHECK</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Local Order:</b> {order_id}\n"
+            f"<b>Panel Order:</b> {escape(str(external_id))}\n"
+            f"<b>Panel Status:</b> {escape(raw_status or 'Unknown')}\n"
+            f"<b>Database Status:</b> {escape(str(database_status))}\n"
+            "━━━━━━━━━━━━━━━━━━"
         )
 
     except ValueError:
-        await message.answer("❌ Order ID number mein bhejein.")
-
-    except Exception as error:
         await message.answer(
-            f"❌ Order check failed: {str(error)[:300]}"
+            "❌ Order ID number mein bhejein."
+        )
+
+    except Exception:
+        logger.exception("Order status check failed.")
+
+        await message.answer(
+            "❌ Order status check nahi ho paya. Logs check karein."
         )
 
 
+# ==========================================
+# CANCEL ORDER
+# ==========================================
+
 @router.message(Command("cancelorder"))
 async def cancel_order_command(message: Message):
+
     if not await order_permission(message):
         return
 
     parts = (message.text or "").split()
 
     if len(parts) != 2:
-        await message.answer("Format:\n/cancelorder ORDER_ID")
+        await message.answer(
+            "Format:\n/cancelorder ORDER_ID"
+        )
         return
 
     try:
         order_id = int(parts[1])
+
+        if order_id <= 0:
+            await message.answer("❌ Invalid Order ID.")
+            return
+
         order = await get_order(order_id)
 
         if not order:
-            await message.answer("❌ Order nahi mila.")
+            await message.answer(
+                "❌ Order nahi mila."
+            )
             return
 
         external_id = order.get("external_order_id")
@@ -244,9 +372,13 @@ async def cancel_order_command(message: Message):
             )
             return
 
-        if order["status"] in ("completed", "cancelled", "failed"):
+        if order["status"] in (
+            "completed",
+            "cancelled",
+            "failed"
+        ):
             await message.answer(
-                f"⚠️ Is order ka status {order['status']} hai. "
+                f"⚠️ Is order ka status {order['status']} hai.\n"
                 "Cancellation request nahi bheji gayi."
             )
             return
@@ -254,29 +386,41 @@ async def cancel_order_command(message: Message):
         panel = await get_panel(order["panel_id"])
 
         if not panel or not panel.get("active"):
-            await message.answer("❌ Assigned panel unavailable hai.")
+            await message.answer(
+                "❌ Assigned panel unavailable hai."
+            )
             return
 
         api = SMMApi(
-            panel["api_url"],
-            panel["api_key"]
+            api_url=panel["api_url"],
+            api_key=panel["api_key"]
         )
 
-        result = await api.cancel_order(str(external_id))
+        result = await api.cancel_order(
+            str(external_id)
+        )
 
         await message.answer(
-            "📨 Cancellation request panel ko bhej di gayi.\n\n"
-            f"Local Order: {order_id}\n"
-            f"Panel Order: {external_id}\n"
-            f"Panel Response: {str(result)[:1000]}\n\n"
-            "Note: Cancellation tabhi confirm hogi jab panel "
-            "status cancelled return kare."
+            "📨 <b>CANCELLATION REQUEST SENT</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Local Order:</b> {order_id}\n"
+            f"<b>Panel Order:</b> {escape(str(external_id))}\n"
+            f"<b>Panel Response:</b>\n"
+            f"<code>{escape(str(result)[:1500])}</code>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Note: Cancellation tabhi confirm hogi "
+            "jab panel status cancelled return karega."
         )
 
     except ValueError:
-        await message.answer("❌ Order ID number mein bhejein.")
-
-    except Exception as error:
         await message.answer(
-            f"❌ Cancellation failed: {str(error)[:300]}"
+            "❌ Order ID number mein bhejein."
         )
+
+    except Exception:
+        logger.exception("Order cancellation failed.")
+
+        await message.answer(
+            "❌ Cancellation request fail ho gayi."
+        )
+

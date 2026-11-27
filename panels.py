@@ -23,6 +23,7 @@ from smm_api import (
     get_panel_services,
 )
 
+
 router = Router()
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,23 @@ class AddPanelState(StatesGroup):
     api_key = State()
 
 
+def is_panel_active(panel):
+    """Support both active and is_active database fields."""
+
+    if not panel:
+        return False
+
+    return bool(
+        panel.get("active", panel.get("is_active", False))
+    )
+
+
 async def panel_permission(message: Message) -> bool:
+    """Check panel management permission safely."""
+
+    if not message.from_user:
+        return False
+
     allowed = await has_permission(
         message.from_user.id,
         "panel_management"
@@ -53,6 +70,12 @@ async def add_new_panel(message: Message, state: FSMContext):
     if not await panel_permission(message):
         return
 
+    if message.chat.type != "private":
+        await message.answer(
+            "⚠️ Panel setup sirf bot ke private chat mein karein."
+        )
+        return
+
     await state.clear()
     await state.set_state(AddPanelState.name)
 
@@ -70,13 +93,21 @@ async def cancel_panel_setup(message: Message, state: FSMContext):
 
     if current_state:
         await state.clear()
-        await message.answer("❌ Panel setup cancel kar diya gaya.")
+        await message.answer(
+            "❌ Panel setup cancel kar diya gaya."
+        )
     else:
-        await message.answer("Koi active setup nahi hai.")
+        await message.answer(
+            "Koi active setup nahi hai."
+        )
 
 
 @router.message(AddPanelState.name)
 async def receive_panel_name(message: Message, state: FSMContext):
+    if not await panel_permission(message):
+        await state.clear()
+        return
+
     name = (message.text or "").strip()
 
     if not name or len(name) > 80:
@@ -85,27 +116,39 @@ async def receive_panel_name(message: Message, state: FSMContext):
         )
         return
 
-    existing = await get_panel_by_name(name)
+    try:
+        existing = await get_panel_by_name(name)
 
-    if existing:
+        if existing:
+            await message.answer(
+                "❌ Is naam ka panel pehle se database mein hai. "
+                "Dusra naam bhejein."
+            )
+            return
+
+        await state.update_data(panel_name=name)
+        await state.set_state(AddPanelState.api_url)
+
         await message.answer(
-            "❌ Is naam ka panel pehle se database mein hai. "
-            "Dusra naam bhejein."
+            "Ab panel ka API URL bhejein.\n\n"
+            "Example:\n"
+            "https://example.com/api/v2"
         )
-        return
 
-    await state.update_data(panel_name=name)
-    await state.set_state(AddPanelState.api_url)
+    except Exception as error:
+        logger.exception("Panel name validation failed")
 
-    await message.answer(
-        "Ab panel ka API URL bhejein.\n\n"
-        "Example:\n"
-        "https://example.com/api/v2"
-    )
+        await message.answer(
+            f"❌ Error: {str(error)[:300]}"
+        )
 
 
 @router.message(AddPanelState.api_url)
 async def receive_panel_url(message: Message, state: FSMContext):
+    if not await panel_permission(message):
+        await state.clear()
+        return
+
     api_url = (message.text or "").strip()
 
     if not api_url.startswith(("http://", "https://")):
@@ -126,24 +169,46 @@ async def receive_panel_url(message: Message, state: FSMContext):
 
 @router.message(AddPanelState.api_key)
 async def receive_panel_key(message: Message, state: FSMContext):
+    if not await panel_permission(message):
+        await state.clear()
+        return
+
+    if message.chat.type != "private":
+        await state.clear()
+        await message.answer(
+            "❌ Security ke liye panel API key sirf private chat mein bhejein."
+        )
+        return
+
     api_key = (message.text or "").strip()
 
     if not api_key:
-        await message.answer("❌ API key empty nahi ho sakti.")
+        await message.answer(
+            "❌ API key empty nahi ho sakti."
+        )
         return
 
-    # API key ko chat history mein rakhne se bachne ki koshish
+    # API key ko chat history mein rakhne se bachayein.
     try:
         await message.delete()
     except Exception:
-        pass
+        logger.warning(
+            "Could not delete API key message. Check bot permissions."
+        )
 
     data = await state.get_data()
 
     panel_name = data.get("panel_name")
     api_url = data.get("api_url")
 
-    await message.answer(
+    if not panel_name or not api_url:
+        await state.clear()
+        await message.answer(
+            "❌ Panel setup data missing hai. /ADDNEW se dobara shuru karein."
+        )
+        return
+
+    status_message = await message.answer(
         "⏳ Panel API connection test ho raha hai..."
     )
 
@@ -153,13 +218,17 @@ async def receive_panel_key(message: Message, state: FSMContext):
             api_key
         )
 
-        if not connection.get("connected"):
-            raise Exception("Panel connection verify nahi hua.")
+        if not connection or not connection.get("connected"):
+            raise ValueError(
+                "Panel connection verify nahi hua."
+            )
 
         existing = await get_panel_by_name(panel_name)
 
         if existing:
-            raise Exception("Is naam ka panel pehle se registered hai.")
+            raise ValueError(
+                "Is naam ka panel pehle se registered hai."
+            )
 
         await add_panel(
             name=panel_name,
@@ -172,7 +241,7 @@ async def receive_panel_key(message: Message, state: FSMContext):
 
         await state.clear()
 
-        await message.answer(
+        await status_message.edit_text(
             "✅ SMM PANEL SUCCESSFULLY ADDED!\n\n"
             f"Panel: {panel_name}\n"
             f"Panel ID: {saved_panel['id'] if saved_panel else 'Saved'}\n"
@@ -184,9 +253,11 @@ async def receive_panel_key(message: Message, state: FSMContext):
     except Exception as error:
         await state.clear()
 
-        logger.exception("Panel registration failed")
+        logger.exception(
+            "Panel registration failed"
+        )
 
-        await message.answer(
+        await status_message.edit_text(
             "❌ Panel add nahi ho paya.\n\n"
             f"Reason: {str(error)[:400]}\n\n"
             "API URL aur API KEY verify karein."
@@ -202,28 +273,40 @@ async def all_smm_panels(message: Message):
         panels = await get_all_panels(active_only=False)
 
         if not panels:
-            await message.answer("Abhi koi SMM panel add nahi hai.")
+            await message.answer(
+                "Abhi koi SMM panel add nahi hai."
+            )
             return
 
-        text = "📋 ALL SMM PANELS\n━━━━━━━━━━━━━━━━━━\n"
+        output = (
+            "📋 ALL SMM PANELS\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+        )
 
         for panel in panels:
             status = (
                 "🟢 Active"
-                if panel["active"]
+                if is_panel_active(panel)
                 else "🔴 Inactive"
             )
 
-            text += (
+            output += (
                 f"\nID: {panel['id']}\n"
                 f"Name: {panel['name']}\n"
                 f"Status: {status}\n"
                 "━━━━━━━━━━━━━━━━━━\n"
             )
 
-        await message.answer(text)
+            if len(output) >= 3500:
+                await message.answer(output)
+                output = ""
+
+        if output:
+            await message.answer(output)
 
     except Exception as error:
+        logger.exception("Panel list failed")
+
         await message.answer(
             f"❌ Panel list error: {str(error)[:300]}"
         )
@@ -249,11 +332,15 @@ async def remove_smm_panel(message: Message):
         panel = await get_panel(panel_id)
 
         if not panel:
-            await message.answer("❌ Panel nahi mila.")
+            await message.answer(
+                "❌ Panel nahi mila."
+            )
             return
 
-        if not panel.get("active"):
-            await message.answer("⚠️ Panel pehle se inactive hai.")
+        if not is_panel_active(panel):
+            await message.answer(
+                "⚠️ Panel pehle se inactive hai."
+            )
             return
 
         await remove_panel(panel_id)
@@ -266,9 +353,13 @@ async def remove_smm_panel(message: Message):
         )
 
     except ValueError:
-        await message.answer("❌ Panel ID number mein bhejein.")
+        await message.answer(
+            "❌ Panel ID number mein bhejein."
+        )
 
     except Exception as error:
+        logger.exception("Panel removal failed")
+
         await message.answer(
             f"❌ Panel remove error: {str(error)[:300]}"
         )
@@ -292,7 +383,9 @@ async def panel_info(message: Message):
         panel = await get_panel(panel_id)
 
         if not panel:
-            await message.answer("❌ Panel nahi mila.")
+            await message.answer(
+                "❌ Panel nahi mila."
+            )
             return
 
         await message.answer(
@@ -301,16 +394,20 @@ async def panel_info(message: Message):
             f"ID: {panel['id']}\n"
             f"Name: {panel['name']}\n"
             f"API URL: {panel['api_url']}\n"
-            f"Status: {'Active' if panel['active'] else 'Inactive'}\n"
+            f"Status: {'Active' if is_panel_active(panel) else 'Inactive'}\n"
             f"Last Balance: {panel.get('last_balance')}\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "API KEY: Hidden"
         )
 
     except ValueError:
-        await message.answer("❌ Panel ID number mein bhejein.")
+        await message.answer(
+            "❌ Panel ID number mein bhejein."
+        )
 
     except Exception as error:
+        logger.exception("Panel information failed")
+
         await message.answer(
             f"❌ Panel info error: {str(error)[:300]}"
         )
@@ -334,11 +431,15 @@ async def check_balance(message: Message):
         panel = await get_panel(panel_id)
 
         if not panel:
-            await message.answer("❌ Panel nahi mila.")
+            await message.answer(
+                "❌ Panel nahi mila."
+            )
             return
 
-        if not panel.get("active"):
-            await message.answer("❌ Yeh panel inactive hai.")
+        if not is_panel_active(panel):
+            await message.answer(
+                "❌ Yeh panel inactive hai."
+            )
             return
 
         result = await check_panel_connection(
@@ -362,9 +463,13 @@ async def check_balance(message: Message):
         )
 
     except ValueError:
-        await message.answer("❌ Panel ID number mein bhejein.")
+        await message.answer(
+            "❌ Panel ID number mein bhejein."
+        )
 
     except Exception as error:
+        logger.exception("Panel balance check failed")
+
         await message.answer(
             f"❌ Balance check failed: {str(error)[:300]}"
         )
@@ -388,11 +493,15 @@ async def check_services(message: Message):
         panel = await get_panel(panel_id)
 
         if not panel:
-            await message.answer("❌ Panel nahi mila.")
+            await message.answer(
+                "❌ Panel nahi mila."
+            )
             return
 
-        if not panel.get("active"):
-            await message.answer("❌ Yeh panel inactive hai.")
+        if not is_panel_active(panel):
+            await message.answer(
+                "❌ Yeh panel inactive hai."
+            )
             return
 
         services = await get_panel_services(
@@ -401,17 +510,19 @@ async def check_services(message: Message):
         )
 
         if not services:
-            await message.answer("Is panel par koi service nahi mili.")
+            await message.answer(
+                "Is panel par koi service nahi mili."
+            )
             return
 
-        text = (
+        output = (
             f"📦 SERVICES: {panel['name']}\n"
             f"Total Services: {len(services)}\n"
             "━━━━━━━━━━━━━━━━━━\n"
         )
 
         for service in services[:30]:
-            text += (
+            output += (
                 f"\nID: {service.get('service')}\n"
                 f"Name: {service.get('name', 'Unknown')}\n"
                 f"Category: {service.get('category', 'N/A')}\n"
@@ -421,21 +532,29 @@ async def check_services(message: Message):
                 "------------------\n"
             )
 
+            if len(output) >= 3500:
+                await message.answer(output)
+                output = ""
+
         if len(services) > 30:
-            text += (
+            output += (
                 f"\nAur {len(services) - 30} services hain."
             )
 
-        # Telegram message length limit
-        if len(text) > 4000:
-            text = text[:3900] + "\n\nList shortened."
-
-        await message.answer(text)
+        if output:
+            await message.answer(output)
 
     except ValueError:
-        await message.answer("❌ Panel ID number mein bhejein.")
+        await message.answer(
+            "❌ Panel ID number mein bhejein."
+        )
 
     except Exception as error:
+        logger.exception("Panel services check failed")
+
         await message.answer(
             f"❌ Services check failed: {str(error)[:300]}"
         )
+
+
+logger.info("Panel management router loaded successfully.")

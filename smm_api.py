@@ -1,25 +1,33 @@
 
-import aiohttp
+import asyncio
 import logging
 
+import aiohttp
+
+
 logger = logging.getLogger(__name__)
+
+
+class SMMAPIError(Exception):
+    """Raised when an SMM panel API request fails."""
+    pass
 
 
 class SMMApi:
     """
     Standard SMM Panel API v2 client.
 
-    API actions:
-    balance
-    services
-    add
-    status
-    cancel
+    Supported actions:
+    - balance
+    - services
+    - add
+    - status
+    - cancel
     """
 
     def __init__(self, api_url: str, api_key: str):
-        self.api_url = api_url.strip()
-        self.api_key = api_key.strip()
+        self.api_url = str(api_url or "").strip()
+        self.api_key = str(api_key or "").strip()
 
         if not self.api_url:
             raise ValueError("SMM API URL missing")
@@ -30,9 +38,12 @@ class SMMApi:
         self.timeout = aiohttp.ClientTimeout(total=30)
 
     async def _request(self, payload: dict):
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid API request payload")
+
         data = {
+            **payload,
             "key": self.api_key,
-            **payload
         }
 
         try:
@@ -48,27 +59,35 @@ class SMMApi:
                     response_text = await response.text()
 
                     if response.status != 200:
-                        raise Exception(
-                            f"Panel HTTP Error: {response.status}"
+                        raise SMMAPIError(
+                            f"Panel HTTP error: {response.status}"
                         )
 
                     try:
                         import json
                         result = json.loads(response_text)
-                    except Exception:
-                        raise Exception(
-                            "Panel ne invalid JSON response diya."
+                    except (ValueError, TypeError):
+                        raise SMMAPIError(
+                            "Panel returned invalid JSON response."
                         )
 
                     if isinstance(result, dict) and result.get("error"):
-                        raise Exception(str(result["error"]))
+                        raise SMMAPIError(
+                            str(result["error"])
+                        )
 
                     return result
 
+        except asyncio.TimeoutError:
+            logger.error("SMM panel request timed out")
+            raise SMMAPIError(
+                "SMM panel request timed out."
+            )
+
         except aiohttp.ClientError as error:
-            logger.exception("SMM API connection error")
-            raise Exception(
-                f"Panel connection failed: {str(error)}"
+            logger.exception("SMM panel connection failed")
+            raise SMMAPIError(
+                f"Panel connection failed: {error}"
             )
 
     async def get_balance(self):
@@ -77,11 +96,13 @@ class SMMApi:
         })
 
         if not isinstance(result, dict):
-            raise Exception("Invalid balance response")
+            raise SMMAPIError(
+                "Invalid panel balance response."
+            )
 
         return {
             "balance": result.get("balance"),
-            "currency": result.get("currency")
+            "currency": result.get("currency"),
         }
 
     async def get_services(self):
@@ -90,7 +111,9 @@ class SMMApi:
         })
 
         if not isinstance(result, list):
-            raise Exception("Invalid services response")
+            raise SMMAPIError(
+                "Invalid panel services response."
+            )
 
         return result
 
@@ -100,69 +123,91 @@ class SMMApi:
         link: str,
         quantity: int
     ):
-        if int(service_id) <= 0:
-            raise ValueError("Invalid service ID")
+        try:
+            service_id = int(service_id)
+            quantity = int(quantity)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "Service ID and quantity must be numbers."
+            )
 
-        if int(quantity) <= 0:
-            raise ValueError("Quantity must be greater than zero")
+        link = str(link or "").strip()
+
+        if service_id <= 0:
+            raise ValueError("Invalid service ID.")
+
+        if quantity <= 0:
+            raise ValueError(
+                "Quantity must be greater than zero."
+            )
 
         if not link:
-            raise ValueError("Post link missing")
+            raise ValueError("Post link missing.")
 
         result = await self._request({
             "action": "add",
-            "service": int(service_id),
+            "service": service_id,
             "link": link,
-            "quantity": int(quantity)
+            "quantity": quantity,
         })
 
         if not isinstance(result, dict):
-            raise Exception("Invalid order response")
-
-        if result.get("error"):
-            raise Exception(str(result["error"]))
+            raise SMMAPIError(
+                "Invalid panel order response."
+            )
 
         order_id = result.get("order")
 
         if not order_id:
-            raise Exception(
+            raise SMMAPIError(
                 f"Panel did not return order ID: {result}"
             )
 
         return {
             "order": str(order_id),
-            "response": result
+            "response": result,
         }
 
     async def get_order_status(self, order_id: str):
+        order_id = str(order_id or "").strip()
+
+        if not order_id:
+            raise ValueError("Order ID is required.")
+
         result = await self._request({
             "action": "status",
-            "order": str(order_id)
+            "order": order_id,
         })
 
         if not isinstance(result, dict):
-            raise Exception("Invalid order status response")
-
-        if result.get("error"):
-            raise Exception(str(result["error"]))
+            raise SMMAPIError(
+                "Invalid order status response."
+            )
 
         return result
 
     async def cancel_order(self, order_id: str):
+        order_id = str(order_id or "").strip()
+
+        if not order_id:
+            raise ValueError("Order ID is required.")
+
         result = await self._request({
             "action": "cancel",
-            "orders": str(order_id)
+            "orders": order_id,
         })
-
-        if isinstance(result, dict) and result.get("error"):
-            raise Exception(str(result["error"]))
 
         return result
 
 
-# Simple helper functions
+# --------------------------------------------------
+# HELPER FUNCTIONS
+# --------------------------------------------------
 
-async def check_panel_connection(api_url: str, api_key: str):
+async def check_panel_connection(
+    api_url: str,
+    api_key: str
+):
     api = SMMApi(api_url, api_key)
 
     balance = await api.get_balance()
@@ -170,12 +215,16 @@ async def check_panel_connection(api_url: str, api_key: str):
     return {
         "connected": True,
         "balance": balance.get("balance"),
-        "currency": balance.get("currency")
+        "currency": balance.get("currency"),
     }
 
 
-async def get_panel_services(api_url: str, api_key: str):
+async def get_panel_services(
+    api_url: str,
+    api_key: str
+):
     api = SMMApi(api_url, api_key)
+
     return await api.get_services()
 
 
@@ -191,7 +240,7 @@ async def place_panel_order(
     return await api.add_order(
         service_id=service_id,
         link=link,
-        quantity=quantity
+        quantity=quantity,
     )
 
 
@@ -213,3 +262,4 @@ async def cancel_panel_order(
     api = SMMApi(api_url, api_key)
 
     return await api.cancel_order(order_id)
+
